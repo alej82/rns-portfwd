@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rns-portfwd"
+version = "0.1.0"
+description = "Multiplexed TCP port forwarding over Reticulum"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = ["rns>=1.5.7,<2"]
+authors = [{ name = "rns-portfwd contributors" }]
+
+[project.scripts]
+rns-portfwd-server = "rns_portfwd.cli_server:main"
+rns-portfwd-client = "rns_portfwd.cli_client:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+  "integration: tests that launch real Reticulum processes",
+  "slow: long-running or timing-sensitive tests",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501", "SIM105"]
