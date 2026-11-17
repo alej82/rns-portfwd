@@ -228,7 +228,7 @@ class PortfwdClient:
                 response = link_request(
                     link,
                     "/probe",
-                    {"service": forward.name, "password": forward.password},
+                    {"service": forward.name, "password": forward.password or ""},
                     self.connect_timeout,
                 )
                 if not isinstance(response, dict) or not response.get("ok"):
@@ -333,7 +333,7 @@ class PortfwdClient:
 
         try:
             mux.transport.send_open(
-                stream_id, PROTOCOL_VERSION, forward.name, forward.password
+                stream_id, PROTOCOL_VERSION, forward.name, forward.password or ""
             )
         except Exception as exc:
             mux.remove(stream_id)
@@ -443,7 +443,7 @@ class PortfwdClient:
 
             try:
                 mux.transport.send_open(
-                    stream_id, PROTOCOL_VERSION, forward.name, forward.password
+                    stream_id, PROTOCOL_VERSION, forward.name, forward.password or ""
                 )
             except Exception as exc:
                 mux.remove(stream_id)
@@ -626,7 +626,8 @@ def run_probe(
             )
             if not isinstance(response, dict) or not response.get("ok"):
                 raise AuthError(
-                    f"authentication failed for service {service!r}"
+                    f"authentication failed for service {service!r}; "
+                    "the service may require --service-password"
                 )
             public = response.get("service", {})
             print(

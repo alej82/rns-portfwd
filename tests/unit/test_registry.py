@@ -56,3 +56,37 @@ def test_connection_limits():
     registry.release("ssh")
     registry.release("ssh")
     assert registry.active_connections("ssh") == 0
+
+
+def make_public_registry(max_private=2, max_public=1):
+    services = [
+        Service("127.0.0.1", 22, "ssh", "secret"),
+        Service("127.0.0.1", 80, "web", None),
+    ]
+    return ServiceRegistry(services, "listpass", max_private, max_public)
+
+
+def test_public_service_accepts_any_credential():
+    registry = make_public_registry()
+    for password in ("", "anything", None):
+        service = registry.authenticate("web", password)
+        assert service is not None and service.name == "web"
+    assert registry.authenticate("ssh", "") is None
+    assert registry.authenticate("missing", "") is None
+    assert registry.probe("web", "") == {
+        "name": "web",
+        "protocol": "tcp",
+        "auth": False,
+    }
+
+
+def test_public_connection_limit_is_separate():
+    registry = make_public_registry(max_private=2, max_public=1)
+    assert registry.acquire("web") is True
+    assert registry.acquire("web") is False
+    assert registry.acquire("ssh") is True
+    assert registry.acquire("ssh") is True
+    assert registry.acquire("ssh") is False
+    registry.release("web")
+    assert registry.active_connections("web") == 0
+    assert registry.acquire("web") is True

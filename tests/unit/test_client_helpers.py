@@ -122,6 +122,25 @@ def test_probe_all_accepts_matching_protocol(monkeypatch):
     client._probe_all()
 
 
+def test_probe_all_sends_empty_password_for_public_forward(monkeypatch):
+    seen: list[dict] = []
+
+    def fake_request(link, path, data, timeout):
+        seen.append(dict(data))
+        return {"ok": True, "service": {"name": "web", "protocol": "tcp"}}
+
+    monkeypatch.setattr("rns_portfwd.client.link_request", fake_request)
+    client = PortfwdClient(
+        server_hash=b"0" * 16,
+        forwards=[Forward("web", 0, None)],
+        bind="127.0.0.1",
+        logger=LOGGER,
+    )
+    client.link = object()
+    client._probe_all()
+    assert seen == [{"service": "web", "password": ""}]
+
+
 def test_bind_collision_raises():
     occupied = socket.socket()
     occupied.bind(("127.0.0.1", 0))

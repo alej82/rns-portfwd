@@ -13,9 +13,13 @@ from rns_portfwd.config import (
     apply_forward_secrets,
     apply_server_secrets,
     parse_expose,
+    parse_expose_public,
     parse_expose_udp,
+    parse_expose_udp_public,
     parse_forward,
+    parse_forward_public,
     parse_forward_udp,
+    parse_forward_udp_public,
     read_secret_source,
     resolve_list_password,
     resolve_probe_password,
@@ -185,6 +189,88 @@ def test_read_secret_source_from_stdin(monkeypatch):
     assert used is True
     assert document is not None
     assert document["list_password"] == "lp"
+
+
+def test_parse_public_service_and_forward():
+    service = parse_expose_public("127.0.0.1:80:web")
+    assert service == Service("127.0.0.1", 80, "web", None)
+    assert service.public() == {"name": "web", "protocol": "tcp", "auth": False}
+    udp = parse_expose_udp_public("[::1]:5353:dns")
+    assert udp == Service("::1", 5353, "dns", None, protocol="udp")
+    assert parse_forward_public("web:8080") == Forward("web", 8080, None)
+    assert parse_forward_udp_public("dns:0") == Forward("dns", 0, None, protocol="udp")
+
+
+def test_parse_public_rejects_bad_fields():
+    for value in (
+        "host:80",
+        "host:80:",
+        "host:80:web:pw",
+        ":80:web",
+        "host:0:web",
+        "host:70000:web",
+        "host:80:bad.name",
+        "[::1]:80",
+    ):
+        with pytest.raises(ConfigError):
+            parse_expose_public(value)
+    for value in ("web", "web:", "bad.name:8080", "web:-1", "web:70000"):
+        with pytest.raises(ConfigError):
+            parse_forward_public(value)
+
+
+def test_public_names_stay_unique_across_visibility():
+    with pytest.raises(ConfigError):
+        validate_services(
+            [Service("h", 22, "ssh", "s"), Service("h", 80, "ssh", None)]
+        )
+    validate_forwards(
+        [Forward("web", 8080, None), Forward("dns", 8080, None, protocol="udp")]
+    )
+    with pytest.raises(ConfigError):
+        validate_forwards([Forward("web", 8080, None), Forward("db", 8080, "pw")])
+
+
+def test_public_services_are_exempt_from_secret_sources():
+    services = [Service("h", 22, "ssh", "-"), Service("h", 80, "web", None)]
+    resolved, list_password = apply_server_secrets(
+        services, "-", {"list_password": "lp", "services": {"ssh": "sp"}}, True
+    )
+    assert [service.password for service in resolved] == ["sp", None]
+    assert resolved[1].public()["auth"] is False
+    assert list_password == "lp"
+
+    resolved, list_password = apply_server_secrets(
+        [Service("h", 80, "web", None)], None, None, False
+    )
+    assert resolved[0].password is None
+    assert list_password is None
+
+
+def test_public_service_needs_no_document_entry():
+    services = [Service("h", 80, "web", None)]
+    resolved, list_password = apply_server_secrets(services, None, {}, True)
+    assert resolved[0].password is None
+    assert list_password is None
+
+
+def test_public_forwards_are_exempt_from_secret_sources():
+    forwards = [Forward("db", 15432, "-"), Forward("web", 8080, None)]
+    resolved = apply_forward_secrets(forwards, {"services": {"db": "pw"}}, True)
+    assert [forward.password for forward in resolved] == ["pw", None]
+
+    assert apply_forward_secrets(forwards[1:], None, False)[0].password is None
+
+
+def test_resolve_probe_password_defaults_to_empty():
+    assert resolve_probe_password(None, None, False, "web") == ""
+    assert resolve_probe_password(None, {}, True, "web") == ""
+    assert (
+        resolve_probe_password("-", {"services": {"ssh": "sp"}}, True, "ssh")
+        == "sp"
+    )
+    with pytest.raises(ConfigError):
+        resolve_probe_password("", None, False, "web")
 
 
 def test_read_secret_source_rejects_both_and_invalid(monkeypatch):

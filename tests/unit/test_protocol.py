@@ -61,6 +61,16 @@ def test_open_roundtrip():
     )
 
 
+def test_open_roundtrip_with_empty_password():
+    message = roundtrip(OpenMessage(7, 1, "web", ""), OpenMessage)
+    assert (message.stream_id, message.service, message.password) == (7, "web", "")
+
+
+def test_open_rejects_empty_service():
+    with pytest.raises(ProtocolError):
+        OpenMessage(1, 1, "", "").pack()
+
+
 def test_open_ok_roundtrip():
     message = roundtrip(OpenOkMessage(7, 4096), OpenOkMessage)
     assert message.stream_id == 7

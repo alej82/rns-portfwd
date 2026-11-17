@@ -54,8 +54,10 @@ def _check_close_reason(reason: object) -> int:
         raise ProtocolError(f"unknown close reason: {reason!r}") from None
 
 
-def _encode_text(value: object, *, field: str, limit: int) -> bytes:
-    if not isinstance(value, str) or not value:
+def _encode_text(
+    value: object, *, field: str, limit: int, allow_empty: bool = False
+) -> bytes:
+    if not isinstance(value, str) or (not value and not allow_empty):
         raise ProtocolError(f"{field} must be a non-empty string")
     encoded = value.encode("utf-8")
     if len(encoded) > limit:
@@ -84,7 +86,12 @@ class OpenMessage(RNS.MessageBase):
         if not isinstance(self.version, int) or not 0 <= self.version <= 255:
             raise ProtocolError("version must be an unsigned byte")
         service = _encode_text(self.service, field="service", limit=_MAX_SERVICE_LEN)
-        password = _encode_text(self.password, field="password", limit=_MAX_PASSWORD_LEN)
+        password = _encode_text(
+            self.password,
+            field="password",
+            limit=_MAX_PASSWORD_LEN,
+            allow_empty=True,
+        )
         return (
             struct.pack(">HBHH", stream_id, self.version, len(service), len(password))
             + service

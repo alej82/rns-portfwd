@@ -11,7 +11,9 @@ from .client import PortfwdClient, run_list, run_probe
 from .config import (
     apply_forward_secrets,
     parse_forward,
+    parse_forward_public,
     parse_forward_udp,
+    parse_forward_udp_public,
     read_secret_source,
     resolve_list_password,
     resolve_probe_password,
@@ -37,6 +39,7 @@ examples:
   rns-portfwd-client probe --server <hash> --service ssh --service-password s3cret
   rns-portfwd-client forward --server <hash> --forward ssh:2222:s3cret
   rns-portfwd-client forward --server <hash> --forward-udp dns:5353:s3cret
+  rns-portfwd-client forward --server <hash> --forward-public web:8080
   rns-portfwd-client forward --server <hash> --forward ssh:2222:- --secrets-fd 3
 """
 
@@ -104,6 +107,20 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="NAME:LOCAL_PORT:PASSWORD",
         help="UDP forward definition; may be repeated",
     )
+    forward.add_argument(
+        "--forward-public",
+        action="append",
+        default=[],
+        metavar="NAME:LOCAL_PORT",
+        help="TCP forward to a passwordless service; may be repeated",
+    )
+    forward.add_argument(
+        "--forward-udp-public",
+        action="append",
+        default=[],
+        metavar="NAME:LOCAL_PORT",
+        help="UDP forward to a passwordless service; may be repeated",
+    )
     forward.add_argument("--bind", default="127.0.0.1", help="local bind address")
     forward.add_argument("--window", type=int, default=DEFAULT_WINDOW)
     forward.add_argument("--max-streams", type=int, default=DEFAULT_MAX_STREAMS)
@@ -159,6 +176,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "forward":
             forwards = [parse_forward(item) for item in args.forward]
             forwards += [parse_forward_udp(item) for item in args.forward_udp]
+            forwards += [parse_forward_public(item) for item in args.forward_public]
+            forwards += [parse_forward_udp_public(item) for item in args.forward_udp_public]
             validate_forwards(forwards)
             if not 1024 <= args.window <= MAX_CREDIT:
                 raise ConfigError(f"--window must be between 1024 and {MAX_CREDIT}")

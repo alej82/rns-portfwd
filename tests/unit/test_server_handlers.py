@@ -161,3 +161,62 @@ def test_open_stream_limit():
     ctx, link, mux = make_ctx(server, reserve=False)
     server._handle_open(ctx, OpenMessage(1, 1, "ssh", "secret"))
     assert mux.transport.errors == [(1, ErrorCode.LIMIT)]
+
+
+def make_public_server(max_public=2):
+    return PortfwdServer(
+        services=[
+            Service("127.0.0.1", 22, "ssh", "secret"),
+            Service("127.0.0.1", 80, "web", None),
+        ],
+        list_password="listpass",
+        identity_path="/tmp/unused.id",
+        name="test",
+        config_dir=None,
+        logger=LOGGER,
+        max_connections_per_service=2,
+        max_connections_per_public=max_public,
+    )
+
+
+def test_open_public_service_skips_authentication(monkeypatch):
+    server = make_public_server()
+    ctx, link, mux = make_ctx(server)
+    opened: list[int] = []
+    monkeypatch.setattr(
+        server, "_open_backend", lambda context, service, stream_id: opened.append(stream_id)
+    )
+    server._handle_open(ctx, OpenMessage(1, 1, "web", ""))
+    server._handle_open(ctx, OpenMessage(2, 1, "web", "stray"))
+    deadline = time.monotonic() + 2
+    while len(opened) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert opened == [1, 2]
+    assert ctx.tracker.failures == 0
+    assert mux.transport.errors == []
+    assert link.torn_down is False
+
+
+def test_public_connection_limit_is_separate(monkeypatch):
+    server = make_public_server(max_public=1)
+    ctx, _, mux = make_ctx(server)
+    monkeypatch.setattr(server, "_open_backend", lambda context, service, stream_id: None)
+    server._handle_open(ctx, OpenMessage(1, 1, "web", ""))
+    server._handle_open(ctx, OpenMessage(2, 1, "web", ""))
+    assert mux.transport.errors == [(2, ErrorCode.LIMIT)]
+    server._handle_open(ctx, OpenMessage(3, 1, "ssh", "secret"))
+    assert mux.transport.errors == [(2, ErrorCode.LIMIT)]
+
+
+def test_list_and_probe_report_public_auth(monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda seconds: None)
+    server = make_public_server()
+    services = server._handle_list(*args({"password": "listpass"}))["services"]
+    assert {item["name"]: item["auth"] for item in services} == {
+        "ssh": True,
+        "web": False,
+    }
+    assert server._handle_probe(*args({"service": "web", "password": ""})) == {
+        "ok": True,
+        "service": {"name": "web", "protocol": "tcp", "auth": False},
+    }

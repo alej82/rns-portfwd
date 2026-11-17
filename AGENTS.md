@@ -5,9 +5,9 @@ Guidance for coding agents working in this repository.
 ## Project
 
 `rns-portfwd` is a Python package that forwards TCP and UDP through Reticulum.
-The server exports named, password-protected services; the client resolves a
-32-hex destination hash, opens one `Link`, and multiplexes every local TCP
-connection or UDP flow as a stream over that Link.
+The server exports named services, password-protected or public; the client
+resolves a 32-hex destination hash, opens one `Link`, and multiplexes every
+local TCP connection or UDP flow as a stream over that Link.
 
 - User docs: `README.md`
 - Package source: `src/rns_portfwd/`
@@ -105,6 +105,20 @@ daemon.
 - `/list` requires `--list-password`. `/probe` validates service credentials
   without connecting to the backend. Unknown service and wrong password must be
   indistinguishable.
+- `Service.password` and `Forward.password` are `str | None`; `None` marks a
+  public service or forward. A service declared with `--expose-public` /
+  `--expose-udp-public` authorizes any `OPEN` or `/probe` password, including an
+  empty one. That is not an authentication failure: do not increment
+  `AuthTracker` or delay an `OPEN_ERR` for it.
+- `/list` and `/probe` report a public service with `"auth": false`. Announces
+  never reveal which services are public; the announce `auth` field only
+  reflects whether enumeration is enabled.
+- Public services are bounded by `--max-connections-per-public` (8 by default),
+  not `--max-connections-per-service`. UDP sessions on a public service count
+  against the public limit too.
+- Public services need no entry in the JSON secret document and do not use the
+  `-` placeholder. They may be mixed with private services that do use a secret
+  source.
 - Never expose backend host/port or passwords in responses, announces, logs, or
   errors. Redact registered secrets.
 - Address servers only by destination hash; display names are labels.

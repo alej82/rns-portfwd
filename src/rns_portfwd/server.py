@@ -13,6 +13,7 @@ from .constants import (
     AUTH_FAILURE_DELAY,
     DEFAULT_AUTH_TIMEOUT,
     DEFAULT_BACKEND_TIMEOUT,
+    DEFAULT_MAX_CONNECTIONS_PER_PUBLIC,
     DEFAULT_MAX_CONNECTIONS_PER_SERVICE,
     DEFAULT_MAX_LINKS,
     DEFAULT_MAX_STREAMS,
@@ -63,6 +64,7 @@ class PortfwdServer:
         max_links: int = DEFAULT_MAX_LINKS,
         max_streams: int = DEFAULT_MAX_STREAMS,
         max_connections_per_service: int = DEFAULT_MAX_CONNECTIONS_PER_SERVICE,
+        max_connections_per_public: int = DEFAULT_MAX_CONNECTIONS_PER_PUBLIC,
         auth_timeout: float = DEFAULT_AUTH_TIMEOUT,
         backend_timeout: float = DEFAULT_BACKEND_TIMEOUT,
         udp_idle_timeout: float = DEFAULT_UDP_IDLE_TIMEOUT,
@@ -89,6 +91,7 @@ class PortfwdServer:
             services=services,
             list_password=list_password,
             max_connections_per_service=max_connections_per_service,
+            max_connections_per_public=max_connections_per_public,
         )
         self.destination = None
         self.identity = None

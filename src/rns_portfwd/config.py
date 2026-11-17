@@ -22,18 +22,22 @@ class Service:
     host: str
     port: int
     name: str
-    password: str
+    password: str | None
     protocol: str = "tcp"
 
     def public(self) -> dict:
-        return {"name": self.name, "protocol": self.protocol, "auth": True}
+        return {
+            "name": self.name,
+            "protocol": self.protocol,
+            "auth": self.password is not None,
+        }
 
 
 @dataclass(frozen=True)
 class Forward:
     name: str
     local_port: int
-    password: str
+    password: str | None
     protocol: str = "tcp"
 
 
@@ -103,6 +107,41 @@ def parse_expose_udp(value: str) -> Service:
     return _parse_expose(value, "udp")
 
 
+def _parse_expose_public(value: str, protocol: str) -> Service:
+    if value.startswith("["):
+        end = value.find("]")
+        if end < 0:
+            raise ConfigError("unterminated bracketed IPv6 host")
+        host = value[1:end]
+        remainder = value[end + 1 :]
+        if not remainder.startswith(":"):
+            raise ConfigError("expected ':' after bracketed host")
+        fields = remainder[1:].split(":", 1)
+        if len(fields) != 2:
+            raise ConfigError("expected [host]:port:name")
+        port_text, name = fields
+    else:
+        fields = value.split(":", 2)
+        if len(fields) != 3:
+            raise ConfigError("expected host:port:name")
+        host, port_text, name = fields
+        if ":" in host:
+            raise ConfigError("IPv6 hosts must be written in brackets")
+    if not host:
+        raise ConfigError("backend host must not be empty")
+    port = _parse_port(port_text, allow_zero=False, field="backend")
+    validate_name(name)
+    return Service(host=host, port=port, name=name, password=None, protocol=protocol)
+
+
+def parse_expose_public(value: str) -> Service:
+    return _parse_expose_public(value, "tcp")
+
+
+def parse_expose_udp_public(value: str) -> Service:
+    return _parse_expose_public(value, "udp")
+
+
 def _parse_forward(value: str, protocol: str) -> Forward:
     fields = value.split(":", 2)
     if len(fields) != 3:
@@ -120,6 +159,24 @@ def parse_forward(value: str) -> Forward:
 
 def parse_forward_udp(value: str) -> Forward:
     return _parse_forward(value, "udp")
+
+
+def _parse_forward_public(value: str, protocol: str) -> Forward:
+    fields = value.split(":", 1)
+    if len(fields) != 2:
+        raise ConfigError("expected name:local_port")
+    name, port_text = fields
+    validate_name(name)
+    port = _parse_port(port_text, allow_zero=True, field="local")
+    return Forward(name=name, local_port=port, password=None, protocol=protocol)
+
+
+def parse_forward_public(value: str) -> Forward:
+    return _parse_forward_public(value, "tcp")
+
+
+def parse_forward_udp_public(value: str) -> Forward:
+    return _parse_forward_public(value, "udp")
 
 
 def validate_services(services: list[Service]) -> None:
@@ -217,14 +274,15 @@ def apply_server_secrets(
         if list_password == _SECRET_PLACEHOLDER:
             raise ConfigError("list password '-' requires --password-stdin or --secrets-fd")
         for service in services:
-            validate_secret(service.password, "service password")
+            if service.password is not None:
+                validate_secret(service.password, "service password")
         if list_password is not None:
             validate_secret(list_password, "list password")
         return services, list_password
 
     assert document is not None
     for service in services:
-        if service.password != _SECRET_PLACEHOLDER:
+        if service.password is not None and service.password != _SECRET_PLACEHOLDER:
             raise ConfigError(
                 "inline and external secrets are ambiguous: use '-' for every --expose password"
             )
@@ -238,14 +296,19 @@ def apply_server_secrets(
             host=s.host,
             port=s.port,
             name=s.name,
-            password=_doc_service(document, s.name),
+            password=(
+                _doc_service(document, s.name)
+                if s.password == _SECRET_PLACEHOLDER
+                else None
+            ),
             protocol=s.protocol,
         )
         for s in services
     ]
     resolved_list = _doc_list_password(document) if list_password == _SECRET_PLACEHOLDER else None
     for service in resolved_services:
-        validate_secret(service.password, "service password")
+        if service.password is not None:
+            validate_secret(service.password, "service password")
     if resolved_list is not None:
         validate_secret(resolved_list, "list password")
     return resolved_services, resolved_list
@@ -264,7 +327,7 @@ def apply_forward_secrets(
 
     assert document is not None
     for forward in forwards:
-        if forward.password != _SECRET_PLACEHOLDER:
+        if forward.password is not None and forward.password != _SECRET_PLACEHOLDER:
             raise ConfigError(
                 "inline and external secrets are ambiguous: use '-' for every --forward password"
             )
@@ -272,13 +335,16 @@ def apply_forward_secrets(
         Forward(
             name=f.name,
             local_port=f.local_port,
-            password=_doc_service(document, f.name),
+            password=(
+                _doc_service(document, f.name) if f.password == _SECRET_PLACEHOLDER else None
+            ),
             protocol=f.protocol,
         )
         for f in forwards
     ]
     for forward in resolved:
-        validate_secret(forward.password, "forward password")
+        if forward.password is not None:
+            validate_secret(forward.password, "forward password")
     return resolved
 
 
@@ -312,11 +378,13 @@ def resolve_probe_password(
     if not source_used:
         if inline == _SECRET_PLACEHOLDER:
             raise ConfigError("probe password '-' requires --password-stdin or --secrets-fd")
-        if not inline:
-            raise ConfigError("--service-password is required")
+        if inline is None:
+            return ""
         return validate_secret(inline, "probe password")
     assert document is not None
-    if inline not in (None, _SECRET_PLACEHOLDER):
+    if inline is None:
+        return ""
+    if inline != _SECRET_PLACEHOLDER:
         raise ConfigError(
             "inline and external secrets are ambiguous: use '--service-password -' with a secret source"
         )

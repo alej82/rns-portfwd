@@ -207,6 +207,8 @@ def start_server(
     password: str = "secret",
     list_password: str = "listpass",
     udp_services: dict[str, int] | None = None,
+    public_services: dict[str, int] | None = None,
+    public_udp_services: dict[str, int] | None = None,
 ) -> tuple[Process, str]:
     identity = instance.root / "server.id"
     args = [
@@ -226,6 +228,10 @@ def start_server(
         args += ["--expose", f"127.0.0.1:{port}:{name}:{password}"]
     for name, port in (udp_services or {}).items():
         args += ["--expose-udp", f"127.0.0.1:{port}:{name}:{password}"]
+    for name, port in (public_services or {}).items():
+        args += ["--expose-public", f"127.0.0.1:{port}:{name}"]
+    for name, port in (public_udp_services or {}).items():
+        args += ["--expose-udp-public", f"127.0.0.1:{port}:{name}"]
     args += extra or []
     process = Process(args)
     line = process.wait_for("destination:", timeout=30)
@@ -238,6 +244,8 @@ def start_client(
     forwards: list[str],
     extra: list[str] | None = None,
     udp_forwards: list[str] | None = None,
+    public_forwards: list[str] | None = None,
+    public_udp_forwards: list[str] | None = None,
 ) -> Process:
     args = [
         sys.executable,
@@ -253,9 +261,19 @@ def start_client(
         args += ["--forward", forward]
     for forward in udp_forwards or []:
         args += ["--forward-udp", forward]
+    for forward in public_forwards or []:
+        args += ["--forward-public", forward]
+    for forward in public_udp_forwards or []:
+        args += ["--forward-udp-public", forward]
     args += extra or []
     process = Process(args)
-    for _ in range(len(forwards) + len(udp_forwards or [])):
+    expected = (
+        len(forwards)
+        + len(udp_forwards or [])
+        + len(public_forwards or [])
+        + len(public_udp_forwards or [])
+    )
+    for _ in range(expected):
         process.wait_for(" -> ", timeout=30)
     process.wait_for("client ready", timeout=30)
     return process

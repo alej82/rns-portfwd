@@ -11,6 +11,11 @@ Reticulum instead of IP.
 ## Features
 
 - Named TCP and UDP services with an independent password per service.
+- Optional passwordless public services (`--expose-public`,
+  `--expose-udp-public`) with a separate, lower concurrency limit
+  (`--max-connections-per-public`, 8 by default).
+- Clients forward to public services with `--forward-public` or
+  `--forward-udp-public`; `probe` works without `--service-password`.
 - One Reticulum `Link` per server, multiplexing all forwards and connections.
 - Per-stream byte credits, so a slow consumer cannot block the other streams.
 - Half-close and byte-for-byte fidelity for TCP; datagram boundaries for UDP.
@@ -71,7 +76,9 @@ rns-portfwd-server --expose '[::1]:5432:db:secret'
 rns-portfwd-server --expose-udp '[::1]:5353:dns:secret'
 ```
 
-Service names must be unique across TCP and UDP.
+Service names must be unique across TCP and UDP. Use `--expose-public` or
+`--expose-udp-public` for a service with no password; see
+[step 7](#7-expose-and-forward-a-service-without-a-password).
 
 At startup the server prints its destination hash:
 
@@ -80,9 +87,10 @@ destination: 8ed9308efb95ff5bc8a5253ab9789116
 services: ssh, dns, db
 ```
 
-Share that hash and the service passwords out of band. The default identity
-file is `~/.config/rns-portfwd/server.id`; keep it to keep the same address.
-Use `--identity` to choose another path.
+Share that hash and the private service passwords out of band. Public services
+need no password. The default identity file is
+`~/.config/rns-portfwd/server.id`; keep it to keep the same address. Use
+`--identity` to choose another path.
 
 ### 3. List services (optional)
 
@@ -160,6 +168,58 @@ stricter than IP UDP; there is no loss, duplication or reordering to recover
 from. UDP has no half-close or resume: sessions close on idle timeout or Link
 loss, and new datagrams open new sessions after reconnection.
 
+### 7. Expose and forward a service without a password
+
+`--expose-public` and `--expose-udp-public` declare a TCP or UDP service that
+accepts any password, including an empty one. They take `host:port:name` with no
+password field (IPv6 hosts stay bracketed). Public and password-protected
+services can be mixed on one server:
+
+```bash
+rns-portfwd-server \
+  --expose 127.0.0.1:22:ssh:ssh-password \
+  --expose-public 127.0.0.1:80:web \
+  --max-connections-per-public 4 \
+  --list-password list-password
+```
+
+`--max-connections-per-public` (8 by default) bounds concurrent connections per
+public service. It is independent of `--max-connections-per-service` (16 by
+default), which still applies to password-protected services.
+
+A client forwards a public service without a password:
+
+```bash
+rns-portfwd-client forward \
+  --server 8ed9308efb95ff5bc8a5253ab9789116 \
+  --forward-public web:8080
+```
+
+`--forward-udp-public name:local_port` does the same for UDP. `probe` also works
+without `--service-password`; it sends an empty password, so it only succeeds
+against a public service:
+
+```bash
+rns-portfwd-client probe \
+  --server 8ed9308efb95ff5bc8a5253ab9789116 \
+  --service web
+```
+
+`list` shows a public service as `AUTH no`, and `probe` prints `auth=no` for it;
+password-protected services show `yes`:
+
+```
+SERVICE                  PROTOCOL   AUTH
+web                      tcp        no
+ssh                      tcp        yes
+```
+
+`auth` answers only "does this service check a password?", never the password
+itself. If `probe` is run without `--service-password` against a service that
+requires one, it exits with code 5 and suggests `--service-password`. Anyone who
+knows the server's destination hash can use a public service; see
+[Security notes](#security-notes).
+
 ## Secrets without exposing them in `argv`
 
 Passwords passed inline are visible to other local users through `ps` and shell
@@ -190,8 +250,24 @@ For `list` the document is `{"list_password": "..."}`. For `probe` use
 `{"services": {"<name>": "<password>"}}`. UDP services and forwards use the same
 document and key by service name.
 
-Inline and external secrets cannot be mixed: when a secret source is used, all
-passwords must be `-`. Logs and error messages redact registered secrets.
+Public services are exempt from secret sources: `--expose-public`,
+`--expose-udp-public`, `--forward-public` and `--forward-udp-public` carry no
+password, so they need neither the `-` placeholder nor an entry in the
+document. They can be mixed with private services that do use a secret source:
+
+```bash
+printf '%s' '{"services": {"ssh": "sp"}}' |
+  rns-portfwd-server \
+    --expose 127.0.0.1:22:ssh:- \
+    --expose-public 127.0.0.1:80:web \
+    --password-stdin
+```
+
+On the client, `--forward-public web:8080` can sit next to
+`--forward ssh:2222:-` in the same invocation. Inline and external secrets
+cannot be mixed: when a secret source is used, every private password must be
+`-`, while public services remain exempt. Logs and error messages redact
+registered secrets.
 
 ## Discovery and announces
 
@@ -200,7 +276,7 @@ requests for its destination, so a client that knows the hash can reach it.
 `--announce` emits a minimal announce at startup and every
 `--announce-interval` seconds (900 by default). The announce carries only a
 protocol version, the display name, and whether enumeration is enabled; it
-never contains service names or backend addresses.
+never contains service names, backend addresses, or which services are public.
 
 Always address servers by destination hash. Display names are labels, not
 credentials and not addresses.
@@ -228,8 +304,16 @@ credentials and not addresses.
   Link after repeated failures.
 - The server never reveals backend host/port or service passwords in responses,
   announces, or errors.
-- The client is anonymous at the Reticulum identity layer; the service password
-  is the only credential. Use long passwords.
+- The client is anonymous at the Reticulum identity layer; a private service's
+  password is the only credential, and a public service has no credential at
+  all. Use long passwords for private services.
+- A public service is usable by anyone who knows the destination hash. There is
+  no client identity or allow-list, only the per-service connection limit, the
+  Link and stream caps, and whatever the backend enforces itself. Public
+  services default to a lower concurrency limit
+  (`--max-connections-per-public`, 8) than password-protected ones.
+- Announces do not reveal which services are public; a client only learns
+  `auth` from `/list` or `/probe`.
 - Anyone who knows the destination hash can trigger a path response and
   confirm that a stealth server exists. Announces deliberately reveal the
   display name.
@@ -293,6 +377,7 @@ marked `slow` and run by default; deselect them with `-m "not slow"`.
 - No reverse forwarding.
 - One server per client process.
 - No TCP or UDP resumption after reconnect.
-- No client identity/allow-list authorization beyond per-service passwords.
+- No client identity or allow-list authorization: private services rely only on
+  their password, and public services have no credential at all.
 - No configuration files; everything comes from flags and optional secret
   sources.
