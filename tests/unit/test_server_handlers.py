@@ -6,7 +6,12 @@ from types import SimpleNamespace
 
 from rns_portfwd.auth import AuthTracker
 from rns_portfwd.config import Service
-from rns_portfwd.constants import ErrorCode
+from rns_portfwd.constants import (
+    DEFAULT_HALF_OPEN_TIMEOUT,
+    DEFAULT_LINK_STAMP_COST,
+    DEFAULT_MAX_HALF_OPEN,
+    ErrorCode,
+)
 from rns_portfwd.protocol import OpenMessage
 from rns_portfwd.server import LinkContext, PortfwdServer
 
@@ -610,3 +615,121 @@ def test_link_closed_clears_pending_opens_without_releasing_service_slots():
     assert ctx.closing is True
     assert mux.closed is True
     assert server.registry.active_connections("ssh") == 0
+
+
+# --- link stamping wiring -------------------------------------------------
+
+
+class FakeDestination:
+    def __init__(self):
+        self.hexhash = "0" * 32
+        self.max_request_size = None
+        self.established_callback = None
+        self.request_handlers = {}
+        self.accepts_links_value = None
+
+    def set_max_request_size(self, size):
+        self.max_request_size = size
+
+    def set_link_established_callback(self, callback):
+        self.established_callback = callback
+
+    def register_request_handler(self, path, handler, allow=None):
+        self.request_handlers[path] = (handler, allow)
+
+    def accepts_links(self, value):
+        self.accepts_links_value = value
+
+    def deregister_request_handler(self, path):
+        self.request_handlers.pop(path, None)
+
+
+def test_server_stores_link_stamping_settings():
+    server = PortfwdServer(
+        services=[Service("127.0.0.1", 22, "ssh", "secret")],
+        list_password="listpass",
+        identity_path="/tmp/unused.id",
+        name="test",
+        config_dir=None,
+        logger=LOGGER,
+        link_stamp_cost=12.5,
+        max_half_open=4,
+        half_open_timeout=12.5,
+    )
+    assert server.link_stamp_cost == 12.5
+    assert server.max_half_open == 4
+    assert server.half_open_timeout == 12.5
+
+
+def test_server_link_stamping_defaults():
+    server = make_server()
+    assert server.link_stamp_cost == DEFAULT_LINK_STAMP_COST
+    assert server.max_half_open == DEFAULT_MAX_HALF_OPEN
+    assert server.half_open_timeout == DEFAULT_HALF_OPEN_TIMEOUT
+
+
+def install_fake_reticulum(monkeypatch, captured):
+    destination = FakeDestination()
+
+    def fake_make_in_destination(identity, **kwargs):
+        captured["make"] = (identity, kwargs)
+        return destination
+
+    def fake_set_default_app_data(dest, name, auth, stamp_cost=None):
+        captured["app"] = (dest, name, auth, stamp_cost)
+
+    monkeypatch.setattr("rns_portfwd.server.init_reticulum", lambda *a, **k: object())
+    monkeypatch.setattr(
+        "rns_portfwd.server.load_or_create_identity", lambda path: "fake-identity"
+    )
+    monkeypatch.setattr(
+        "rns_portfwd.server.make_in_destination", fake_make_in_destination
+    )
+    monkeypatch.setattr(
+        "rns_portfwd.server.set_default_app_data", fake_set_default_app_data
+    )
+    return destination
+
+
+def test_server_start_passes_link_stamping_settings(monkeypatch):
+    captured = {}
+    destination = install_fake_reticulum(monkeypatch, captured)
+    server = PortfwdServer(
+        services=[Service("127.0.0.1", 22, "ssh", "secret")],
+        list_password="listpass",
+        identity_path="/tmp/unused.id",
+        name="test",
+        config_dir=None,
+        logger=LOGGER,
+        link_stamp_cost=12.5,
+        max_half_open=4,
+        half_open_timeout=12.5,
+    )
+
+    assert server.start() == "0" * 32
+    identity, kwargs = captured["make"]
+    assert identity == "fake-identity"
+    assert kwargs == {
+        "stamp_cost": 12.5,
+        "max_half_open": 4,
+        "half_open_timeout": 12.5,
+    }
+    dest, name, auth, stamp_cost = captured["app"]
+    assert dest is destination
+    assert (name, auth, stamp_cost) == ("test", True, 12.5)
+    assert destination.accepts_links_value is True
+
+
+def test_server_start_passes_zero_cost_by_default(monkeypatch):
+    captured = {}
+    install_fake_reticulum(monkeypatch, captured)
+    server = make_server()
+
+    server.start()
+    _, kwargs = captured["make"]
+    assert kwargs == {
+        "stamp_cost": DEFAULT_LINK_STAMP_COST,
+        "max_half_open": DEFAULT_MAX_HALF_OPEN,
+        "half_open_timeout": DEFAULT_HALF_OPEN_TIMEOUT,
+    }
+    assert captured["app"][3] == DEFAULT_LINK_STAMP_COST

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import signal
 import sys
 
@@ -18,14 +19,18 @@ from .config import (
     parse_expose_udp_public,
     read_secret_source,
     validate_allow_identities,
+    validate_link_stamp_cost,
     validate_services,
 )
 from .constants import (
     DEFAULT_ANNOUNCE_INTERVAL,
     DEFAULT_AUTH_TIMEOUT,
     DEFAULT_BACKEND_TIMEOUT,
+    DEFAULT_HALF_OPEN_TIMEOUT,
+    DEFAULT_LINK_STAMP_COST,
     DEFAULT_MAX_CONNECTIONS_PER_PUBLIC,
     DEFAULT_MAX_CONNECTIONS_PER_SERVICE,
+    DEFAULT_MAX_HALF_OPEN,
     DEFAULT_MAX_LINKS,
     DEFAULT_MAX_STREAMS,
     DEFAULT_UDP_IDLE_TIMEOUT,
@@ -35,6 +40,7 @@ from .constants import (
     MAX_CREDIT,
     STREAM_ID_MAX,
 )
+from .discovery import link_stamp_validation_supported
 from .errors import ConfigError, PortfwdError
 from .logging import register_secret, setup_logging
 from .server import PortfwdServer
@@ -49,6 +55,9 @@ examples:
       --allow-identity ssh:0123456789abcdef0123456789abcdef
   rns-portfwd-server --expose-public 127.0.0.1:80:web \\
       --allow-identity web:fedcba9876543210fedcba9876543210
+  rns-portfwd-server --expose 127.0.0.1:22:ssh:s3cret --link-stamp-cost 12.5
+  rns-portfwd-server --expose 127.0.0.1:22:ssh:s3cret --max-half-open 32 \\
+      --half-open-timeout 30
 """
 
 
@@ -136,6 +145,30 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--auth-timeout", type=float, default=DEFAULT_AUTH_TIMEOUT)
     parser.add_argument("--backend-timeout", type=float, default=DEFAULT_BACKEND_TIMEOUT)
     parser.add_argument(
+        "--link-stamp-cost",
+        type=float,
+        default=DEFAULT_LINK_STAMP_COST,
+        metavar="COST",
+        help=(
+            "require a Reticulum link-request proof-of-work stamp of at least COST "
+            "(0 disables stamping, maximum 40; requires rns>=1.6)"
+        ),
+    )
+    parser.add_argument(
+        "--max-half-open",
+        type=int,
+        default=DEFAULT_MAX_HALF_OPEN,
+        metavar="N",
+        help="maximum links that have not completed the handshake (0 is unlimited)",
+    )
+    parser.add_argument(
+        "--half-open-timeout",
+        type=float,
+        default=DEFAULT_HALF_OPEN_TIMEOUT,
+        metavar="SECONDS",
+        help="establishment timeout for accepted links that are still half-open",
+    )
+    parser.add_argument(
         "--udp-idle-timeout",
         type=float,
         default=DEFAULT_UDP_IDLE_TIMEOUT,
@@ -182,6 +215,16 @@ def _validate_options(args) -> None:
         raise ConfigError("--backend-timeout must be positive")
     if args.udp_idle_timeout <= 0:
         raise ConfigError("--udp-idle-timeout must be positive")
+    args.link_stamp_cost = validate_link_stamp_cost(args.link_stamp_cost)
+    if args.max_half_open < 0:
+        raise ConfigError("--max-half-open must be 0 or greater")
+    if not math.isfinite(args.half_open_timeout) or args.half_open_timeout <= 0:
+        raise ConfigError("--half-open-timeout must be a positive finite number")
+    if args.link_stamp_cost > 0 and not link_stamp_validation_supported():
+        raise ConfigError(
+            "--link-stamp-cost requires native link-request stamping support; "
+            "install rns>=1.6 or leave the cost at 0"
+        )
     if not args.name or len(args.name) > 64:
         raise ConfigError("--name must be between 1 and 64 characters")
 
@@ -229,6 +272,9 @@ def main(argv: list[str] | None = None) -> int:
             backend_timeout=args.backend_timeout,
             udp_idle_timeout=args.udp_idle_timeout,
             verbosity=args.verbose,
+            link_stamp_cost=args.link_stamp_cost,
+            max_half_open=args.max_half_open,
+            half_open_timeout=args.half_open_timeout,
         )
 
         def on_signal(signum, frame):

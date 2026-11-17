@@ -225,6 +225,82 @@ def test_client_default_is_anonymous():
     assert make_client().client_identity is None
 
 
+def test_client_default_link_stamp_settings():
+    client = make_client()
+    assert client.link_stamp_cost is None
+    assert client.no_link_stamp is False
+
+
+def test_client_stores_link_stamp_settings():
+    client = PortfwdClient(
+        server_hash=b"0" * 16,
+        forwards=[Forward("echo", 0, "pw")],
+        bind="127.0.0.1",
+        logger=LOGGER,
+        link_stamp_cost=12.5,
+        no_link_stamp=False,
+    )
+    assert client.link_stamp_cost == 12.5
+    assert client.no_link_stamp is False
+
+
+class StopEvent:
+    def is_set(self):
+        return True
+
+    def set(self):
+        pass
+
+    def wait(self, timeout=None):
+        return True
+
+
+def test_connect_once_configures_link_stamping_before_link(monkeypatch):
+    order: list[str] = []
+    configured: list[tuple] = []
+
+    def fake_configure(server_hash, override, disabled, logger):
+        order.append("stamp")
+        configured.append((server_hash, override, disabled, logger))
+
+    monkeypatch.setattr("rns_portfwd.client.configure_link_stamping", fake_configure)
+
+    class OpenedLink:
+        def get_channel(self):
+            return object()
+
+    class Manager:
+        def __init__(self, identity, **kwargs):
+            order.append("manager")
+
+        def open(self):
+            order.append("open")
+            return OpenedLink()
+
+    class MuxFactory:
+        def __init__(self, **kwargs):
+            pass
+
+    monkeypatch.setattr("rns_portfwd.client.LinkManager", Manager)
+    monkeypatch.setattr("rns_portfwd.client.Mux", MuxFactory)
+    monkeypatch.setattr("rns_portfwd.client.register_message_types", lambda channel: None)
+
+    client = PortfwdClient(
+        server_hash=b"0" * 16,
+        forwards=[],
+        bind="127.0.0.1",
+        logger=LOGGER,
+        link_stamp_cost=8.0,
+    )
+    client._identity = object()
+
+    client._connect_once()
+
+    assert order == ["stamp", "manager", "open"]
+    assert configured == [(b"0" * 16, 8.0, False, LOGGER)]
+
+
+
 def test_connect_once_passes_client_identity_to_link_manager(monkeypatch):
     captured: dict = {}
 

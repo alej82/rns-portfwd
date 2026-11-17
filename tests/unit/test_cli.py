@@ -4,12 +4,17 @@ import io
 import json
 import sys
 
+import pytest
+
 from rns_portfwd.cli_client import build_parser as build_client_parser
 from rns_portfwd.cli_client import main as client_main
 from rns_portfwd.cli_server import build_parser as build_server_parser
 from rns_portfwd.cli_server import main as server_main
 from rns_portfwd.constants import (
+    DEFAULT_HALF_OPEN_TIMEOUT,
+    DEFAULT_LINK_STAMP_COST,
     DEFAULT_MAX_CONNECTIONS_PER_PUBLIC,
+    DEFAULT_MAX_HALF_OPEN,
     DEFAULT_UDP_IDLE_TIMEOUT,
     EXIT_CONFIG,
     EXIT_OK,
@@ -311,3 +316,176 @@ def test_server_rejects_unknown_allow_identity_service():
         )
         == EXIT_CONFIG
     )
+
+
+# --- link stamping --------------------------------------------------------
+
+
+def test_server_parser_accepts_link_stamping_flags():
+    args = build_server_parser().parse_args(
+        [
+            "--expose",
+            "127.0.0.1:22:ssh:pw",
+            "--link-stamp-cost",
+            "12.5",
+            "--max-half-open",
+            "8",
+            "--half-open-timeout",
+            "45",
+        ]
+    )
+    assert args.link_stamp_cost == 12.5
+    assert args.max_half_open == 8
+    assert args.half_open_timeout == 45.0
+
+
+def test_server_parser_link_stamping_defaults():
+    args = build_server_parser().parse_args(["--expose", "127.0.0.1:22:ssh:pw"])
+    assert args.link_stamp_cost == DEFAULT_LINK_STAMP_COST
+    assert args.max_half_open == DEFAULT_MAX_HALF_OPEN
+    assert args.half_open_timeout == DEFAULT_HALF_OPEN_TIMEOUT
+
+
+@pytest.mark.parametrize("value", ["-1", "-0.1", "40.1", "100"])
+def test_server_rejects_out_of_range_link_stamp_cost(value):
+    assert (
+        server_main(
+            [
+                "--expose",
+                "127.0.0.1:22:ssh:pw",
+                "--link-stamp-cost",
+                value,
+            ]
+        )
+        == EXIT_CONFIG
+    )
+
+
+@pytest.mark.parametrize("value", ["nope", ""])
+def test_server_rejects_non_numeric_link_stamp_cost(value):
+    with pytest.raises(SystemExit) as excinfo:
+        server_main(
+            [
+                "--expose",
+                "127.0.0.1:22:ssh:pw",
+                "--link-stamp-cost",
+                value,
+            ]
+        )
+    assert excinfo.value.code == EXIT_CONFIG
+
+
+@pytest.mark.parametrize("value", ["nan", "inf"])
+def test_server_rejects_non_finite_link_stamp_cost(value):
+    assert (
+        server_main(
+            [
+                "--expose",
+                "127.0.0.1:22:ssh:pw",
+                "--link-stamp-cost",
+                value,
+            ]
+        )
+        == EXIT_CONFIG
+    )
+
+
+def test_server_rejects_negative_max_half_open():
+    assert (
+        server_main(
+            [
+                "--expose",
+                "127.0.0.1:22:ssh:pw",
+                "--max-half-open",
+                "-1",
+            ]
+        )
+        == EXIT_CONFIG
+    )
+
+
+def test_server_rejects_zero_half_open_timeout():
+    assert (
+        server_main(
+            [
+                "--expose",
+                "127.0.0.1:22:ssh:pw",
+                "--half-open-timeout",
+                "0",
+            ]
+        )
+        == EXIT_CONFIG
+    )
+
+
+def test_server_rejects_non_finite_half_open_timeout():
+    for value in ("nan", "inf", "-inf"):
+        assert (
+            server_main(
+                [
+                    "--expose",
+                    "127.0.0.1:22:ssh:pw",
+                    f"--half-open-timeout={value}",
+                ]
+            )
+            == EXIT_CONFIG
+        )
+
+
+def test_server_rejects_stamping_without_native_support(monkeypatch):
+    monkeypatch.setattr(
+        "rns_portfwd.cli_server.link_stamp_validation_supported", lambda: False
+    )
+
+    def fail(**kwargs):
+        raise AssertionError("PortfwdServer must not be constructed")
+
+    monkeypatch.setattr("rns_portfwd.cli_server.PortfwdServer", fail)
+    assert (
+        server_main(
+            [
+                "--expose",
+                "127.0.0.1:22:ssh:pw",
+                "--link-stamp-cost",
+                "8",
+            ]
+        )
+        == EXIT_CONFIG
+    )
+
+
+def test_server_allows_zero_cost_without_native_support(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "rns_portfwd.cli_server.link_stamp_validation_supported", lambda: False
+    )
+    captured = capture_server(monkeypatch)
+    assert (
+        server_main(["--expose", "127.0.0.1:22:ssh:pw", "--link-stamp-cost", "0"])
+        == EXIT_OK
+    )
+    assert captured["link_stamp_cost"] == 0.0
+
+
+def test_server_passes_link_stamping_settings(monkeypatch):
+    monkeypatch.setattr(
+        "rns_portfwd.cli_server.link_stamp_validation_supported", lambda: True
+    )
+    captured = capture_server(monkeypatch)
+    assert (
+        server_main(
+            [
+                "--expose",
+                "127.0.0.1:22:ssh:pw",
+                "--link-stamp-cost",
+                "12.5",
+                "--max-half-open",
+                "8",
+                "--half-open-timeout",
+                "45",
+            ]
+        )
+        == EXIT_OK
+    )
+    assert captured["link_stamp_cost"] == 12.5
+    assert captured["max_half_open"] == 8
+    assert captured["half_open_timeout"] == 45.0

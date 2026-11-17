@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import socket
@@ -10,7 +11,7 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass, replace
 
-from .constants import NAME_PATTERN
+from .constants import MAX_LINK_STAMP_COST, NAME_PATTERN
 from .errors import ConfigError
 
 _NAME_RE = re.compile(rf"^{NAME_PATTERN}$")
@@ -65,6 +66,25 @@ def validate_secret(value: str, field: str) -> str:
     if len(value.encode("utf-8")) > _MAX_SECRET_LEN:
         raise ConfigError(f"{field} is too long (max {_MAX_SECRET_LEN} bytes)")
     return value
+
+
+def validate_link_stamp_cost(value) -> float:
+    """Validate and normalize a link-request stamp cost."""
+    if isinstance(value, bool):
+        raise ConfigError("link stamp cost must be a number")
+    try:
+        cost = float(value)
+    except (TypeError, ValueError):
+        raise ConfigError(
+            f"invalid link stamp cost {value!r}: must be a number"
+        ) from None
+    if math.isnan(cost) or math.isinf(cost):
+        raise ConfigError(f"invalid link stamp cost {value!r}: must be finite")
+    if not 0.0 <= cost <= MAX_LINK_STAMP_COST:
+        raise ConfigError(
+            f"link stamp cost must be between 0 and {MAX_LINK_STAMP_COST:g}"
+        )
+    return cost
 
 
 def parse_identity_hash(value: str) -> bytes:

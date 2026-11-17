@@ -18,6 +18,7 @@ from .config import (
     resolve_list_password,
     resolve_probe_password,
     validate_forwards,
+    validate_link_stamp_cost,
 )
 from .constants import (
     DEFAULT_CONNECT_TIMEOUT,
@@ -43,6 +44,9 @@ examples:
   rns-portfwd-client forward --server <hash> --forward-udp dns:5353:s3cret
   rns-portfwd-client forward --server <hash> --forward-public web:8080
   rns-portfwd-client forward --server <hash> --forward ssh:2222:- --secrets-fd 3
+  rns-portfwd-client forward --server <hash> --link-stamp-cost 12.5 \\
+      --forward ssh:2222:s3cret
+  rns-portfwd-client list --server <hash> --no-link-stamp --list-password listpass
   rns-portfwd-client identity --identity ~/.config/rns-portfwd/client.id
   rns-portfwd-client forward --server <hash> --identity ~/.config/rns-portfwd/client.id \\
       --forward ssh:2222:s3cret
@@ -76,6 +80,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="seconds to wait for the Link or a free stream slot",
     )
     parser.add_argument(
+        "--link-stamp-cost",
+        type=float,
+        default=None,
+        metavar="COST",
+        help="override the server's advertised link-request stamp cost",
+    )
+    parser.add_argument(
+        "--no-link-stamp",
+        action="store_true",
+        default=False,
+        help="do not stamp link requests (diagnostic; cannot reach a stamping server)",
+    )
+    parser.add_argument(
         "--password-stdin",
         action="store_true",
         help="read a JSON secret document from stdin",
@@ -95,6 +112,12 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--identity", default=argparse.SUPPRESS, metavar="PATH")
     common.add_argument("--path-timeout", type=float, default=argparse.SUPPRESS)
     common.add_argument("--connect-timeout", type=float, default=argparse.SUPPRESS)
+    common.add_argument(
+        "--link-stamp-cost", type=float, default=argparse.SUPPRESS, metavar="COST"
+    )
+    common.add_argument(
+        "--no-link-stamp", action="store_true", default=argparse.SUPPRESS
+    )
     common.add_argument("--password-stdin", action="store_true", default=argparse.SUPPRESS)
     common.add_argument("--secrets-fd", type=int, default=argparse.SUPPRESS)
     common.add_argument("-v", "--verbose", action="count", default=argparse.SUPPRESS)
@@ -186,6 +209,15 @@ def _validate_common(args) -> None:
         raise ConfigError("--path-timeout must be positive")
     if args.connect_timeout <= 0:
         raise ConfigError("--connect-timeout must be positive")
+    link_stamp_cost = getattr(args, "link_stamp_cost", None)
+    no_link_stamp = getattr(args, "no_link_stamp", False)
+    if link_stamp_cost is not None and no_link_stamp:
+        raise ConfigError(
+            "--link-stamp-cost and --no-link-stamp are mutually exclusive"
+        )
+    if link_stamp_cost is not None:
+        link_stamp_cost = validate_link_stamp_cost(link_stamp_cost)
+        args.link_stamp_cost = link_stamp_cost
 
 
 def _load_client_identity(args, logger):
@@ -211,10 +243,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     logger = setup_logging(args.verbose)
     try:
+        _validate_common(args)
         if args.command == "identity":
             return _run_identity_command(args)
 
-        _validate_common(args)
         document, source_used = read_secret_source(args.password_stdin, args.secrets_fd)
 
         if args.command == "forward":
@@ -248,6 +280,8 @@ def main(argv: list[str] | None = None) -> int:
                 udp_idle_timeout=args.udp_idle_timeout,
                 verbosity=args.verbose,
                 client_identity=client_identity,
+                link_stamp_cost=args.link_stamp_cost,
+                no_link_stamp=args.no_link_stamp,
             )
 
             def on_signal(signum, frame):
@@ -280,6 +314,8 @@ def main(argv: list[str] | None = None) -> int:
                 wait_seconds=args.wait,
                 refresh=args.refresh,
                 client_identity=client_identity,
+                link_stamp_cost=args.link_stamp_cost,
+                no_link_stamp=args.no_link_stamp,
             )
             return EXIT_OK
 
@@ -299,6 +335,8 @@ def main(argv: list[str] | None = None) -> int:
                 path_timeout=args.path_timeout,
                 connect_timeout=args.connect_timeout,
                 client_identity=client_identity,
+                link_stamp_cost=args.link_stamp_cost,
+                no_link_stamp=args.no_link_stamp,
             )
             return EXIT_OK
 

@@ -13,8 +13,11 @@ from .constants import (
     AUTH_FAILURE_DELAY,
     DEFAULT_AUTH_TIMEOUT,
     DEFAULT_BACKEND_TIMEOUT,
+    DEFAULT_HALF_OPEN_TIMEOUT,
+    DEFAULT_LINK_STAMP_COST,
     DEFAULT_MAX_CONNECTIONS_PER_PUBLIC,
     DEFAULT_MAX_CONNECTIONS_PER_SERVICE,
+    DEFAULT_MAX_HALF_OPEN,
     DEFAULT_MAX_LINKS,
     DEFAULT_MAX_STREAMS,
     DEFAULT_UDP_IDLE_TIMEOUT,
@@ -74,6 +77,9 @@ class PortfwdServer:
         udp_idle_timeout: float = DEFAULT_UDP_IDLE_TIMEOUT,
         identity_timeout: float = IDENTITY_WAIT_TIMEOUT,
         verbosity: int = 0,
+        link_stamp_cost: float = DEFAULT_LINK_STAMP_COST,
+        max_half_open: int = DEFAULT_MAX_HALF_OPEN,
+        half_open_timeout: float = DEFAULT_HALF_OPEN_TIMEOUT,
     ):
         self.services = services
         self.list_password = list_password
@@ -92,6 +98,9 @@ class PortfwdServer:
         self.udp_idle_timeout = udp_idle_timeout
         self.identity_timeout = identity_timeout
         self.verbosity = verbosity
+        self.link_stamp_cost = link_stamp_cost
+        self.max_half_open = max_half_open
+        self.half_open_timeout = half_open_timeout
 
         self.registry = ServiceRegistry(
             services=services,
@@ -120,8 +129,18 @@ class PortfwdServer:
     def start(self) -> str:
         self.reticulum = init_reticulum(self.config_dir, self.verbosity)
         self.identity = load_or_create_identity(self.identity_path)
-        self.destination = make_in_destination(self.identity)
-        set_default_app_data(self.destination, self.name, self.list_password is not None)
+        self.destination = make_in_destination(
+            self.identity,
+            stamp_cost=self.link_stamp_cost,
+            max_half_open=self.max_half_open,
+            half_open_timeout=self.half_open_timeout,
+        )
+        set_default_app_data(
+            self.destination,
+            self.name,
+            self.list_password is not None,
+            self.link_stamp_cost,
+        )
         self.destination.set_max_request_size(16384)
         self.destination.set_link_established_callback(self._link_established)
         self.destination.register_request_handler(

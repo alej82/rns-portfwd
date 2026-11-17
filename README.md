@@ -20,6 +20,9 @@ Reticulum instead of IP.
   Reticulum identity hash, independently of the service password. Clients
   present a persistent identity with `--identity`; anonymous clients remain the
   default.
+- Opt-in link-request stamping (`--link-stamp-cost`) that makes opening a
+  `Link` cost client CPU, plus caps for links stuck before the handshake
+  completes.
 - One Reticulum `Link` per server, multiplexing all forwards and connections.
 - Per-stream byte credits, so a slow consumer cannot block the other streams.
 - Half-close and byte-for-byte fidelity for TCP; datagram boundaries for UDP.
@@ -34,7 +37,8 @@ Reticulum instead of IP.
 ## Requirements
 
 - Python 3.10 or newer.
-- Reticulum (`rns>=1.5.7,<2`).
+- Reticulum (`rns>=1.5.7,<2`). Link-request stamping needs Reticulum 1.6; the
+  rest of the features work on 1.5.7.
 - A running `rnsd` (or any Reticulum process) that provides a shared instance.
 
 ## Install
@@ -293,6 +297,79 @@ An unknown service in `--allow-identity`, or a hash that is not exactly 32
 hexadecimal characters, exits with the configuration code (2) before the server
 starts.
 
+### 9. Require proof-of-work to open a Link
+
+Reticulum 1.6 can embed a proof-of-work stamp in the link request itself, before
+the server creates the `Link`, signs a proof, or allocates any per-link state.
+`rns-portfwd-server` can require it, and `rns-portfwd-client` applies it
+automatically:
+
+```bash
+rns-portfwd-server \
+  --expose 127.0.0.1:22:ssh:ssh-password \
+  --link-stamp-cost 12.5 \
+  --max-half-open 64 \
+  --half-open-timeout 60
+```
+
+- `--link-stamp-cost` is the minimum stamp value. `0` (the default) disables
+  stamping and keeps the previous behavior. The valid range is `0`–`40`.
+- `--max-half-open` bounds links in `PENDING`/`HANDSHAKE`, which are not counted
+  by `--max-links`; the default is 64 and `0` means unlimited.
+- `--half-open-timeout` clamps how long an accepted but incomplete Link may
+  live; the default is 60 seconds, well below Reticulum's multi-minute default.
+  Reticulum's watchdog sleeps up to 5 seconds per check, so smaller values are
+  approximate.
+
+When the cost is positive, the server advertises `stamp_cost` in its announce
+app data, including path responses, so clients discover it even when the server
+does not announce periodically. A request with a missing, insufficient, or
+replayed stamp is dropped silently: no `Link`, no proof, no auth error, and no
+`OPEN` handler. Accepted `(ephemeral key, signing key)` pairs are remembered for
+10 minutes so a precomputed stamp cannot be reused immediately.
+
+The client reads `stamp_cost` after resolving the server and enables Reticulum
+link stamping before opening the Link. It re-reads the advertised cost on every
+reconnect, so enabling or changing the cost server-side does not require
+restarting connected clients. Two overrides exist:
+
+```bash
+# Force a cost against a stealth server that hides the field
+rns-portfwd-client forward --server <hash> --forward ssh:2222:pw \
+  --link-stamp-cost 12.5
+
+# Diagnose or intentionally connect without stamping
+rns-portfwd-client list --server <hash> --list-password lp --no-link-stamp
+```
+
+`--link-stamp-cost` and `--no-link-stamp` are mutually exclusive. An explicit
+client cost of `0` also disables native link stamping, including a cost learned
+from Reticulum's own destination stamps; `--no-link-stamp` is the equivalent
+diagnostic flag. A client whose Reticulum cannot generate stamps (RNS 1.5.x)
+fails with exit code 4 before opening a Link when the server requires them.
+
+The server pins the destination's native link cost, including `0`, so a
+Reticulum-wide `[stamps] enforce_stamps = yes` setting does not impose an
+unrelated `LR_COST` on a server that disabled stamping. Costs and hashes are
+public values and may appear in `ps`; they are not secrets.
+
+Compatibility:
+
+| Server cost | Client | Result |
+|---|---|---|
+| `0` | Any | Unchanged |
+| `> 0` | `rns-portfwd-client` with `rns>=1.6` | Automatic stamping |
+| `> 0` | Client with `--link-stamp-cost` at least the server cost | Works, even without the advertised field |
+| `> 0` | `--no-link-stamp`, a lower cost, RNS 1.5.x, or a generic RNS client that does not stamp | No Link; establishment timeout |
+| `> 0` | Allow-listed identity that does not stamp | No Link; allow-lists do not exempt stamps |
+
+Cost guidance: each point roughly doubles the work. `12.5` is Reticulum's
+default and a good interop point; `14`–`16` makes abuse meaningfully expensive
+but can approach Reticulum's 15-second generation timeout on slow hardware. The
+default is disabled, so deploy servers and clients before enabling it. Stamping
+protects Link establishment; it does not replace passwords, allow-lists, or the
+per-service limits.
+
 
 ## Secrets without exposing them in `argv`
 
@@ -349,8 +426,10 @@ By default the server is stealthy: it does not announce, but it answers path
 requests for its destination, so a client that knows the hash can reach it.
 `--announce` emits a minimal announce at startup and every
 `--announce-interval` seconds (900 by default). The announce carries only a
-protocol version, the display name, and whether enumeration is enabled; it
-never contains service names, backend addresses, or which services are public.
+protocol version, the display name, whether enumeration is enabled, and — when
+link stamping is enabled — the advertised stamp cost. It never contains service
+names, backend addresses, identity hashes, or which services are public or
+allow-listed.
 
 Always address servers by destination hash. Display names are labels, not
 credentials and not addresses.
@@ -400,7 +479,14 @@ credentials and not addresses.
   only learns `auth` from `/list` or `/probe`.
 - Anyone who knows the destination hash can trigger a path response and
   confirm that a stealth server exists. Announces deliberately reveal the
-  display name.
+  display name and, when enabled, the link stamp cost.
+- Link-request stamping runs before any `Link` or application state exists and
+  drops bad or replayed requests silently. Accepted stamps are cached for 10
+  minutes; after that a precomputed stamp could be replayed, so the half-open
+  caps remain the backstop for the accepted population.
+- Half-open links (handshake started but RTT never received) are bounded by
+  `--max-half-open` and expired after `--half-open-timeout` instead of
+  Reticulum's multi-minute default. This applies even when stamping is disabled.
 - Backend connections time out; stream counts, Link counts, and per-service
   connections are bounded.
 - TCP connections are not resumed after a Link drop. Live streams and UDP
@@ -433,7 +519,9 @@ Messages are `RNS.Channel` application messages in the `0xAC00` range:
 Reticulum's own Link identification: the initiator calls `Link.identify()` once
 the Link is `ACTIVE`, and the server checks the proved identity before it
 replies to an allow-listed `OPEN` or `/probe`. There is no identity field in the
-application messages and the wire layouts stay unchanged. Stream ids are 14-bit and
+application messages and the wire layouts stay unchanged. Link-request stamping
+is native as well: the proof-of-work is embedded in the link request keyset, so
+it adds no application message and no payload bytes. Stream ids are 14-bit and
 are never reused on a Link. Each stream has an independent byte window; the
 receiver replenishes credit as its local socket drains. The server advertises
 its receive window in `OPEN_OK`; the client advertises the reverse window with a
@@ -469,5 +557,10 @@ marked `slow` and run by default; deselect them with `-m "not slow"`.
   revocation API, group, or enrollment flow, and an anonymous client cannot use
   an allow-listed service. Rotating an identity means editing the server flags
   and restarting it.
+- Link stamping requires Reticulum 1.6 on both ends. RNS 1.5.x clients and
+  generic RNS clients that do not consume the `stamp_cost` app data cannot
+  connect to a server with `--link-stamp-cost > 0`; the default is disabled.
+- The replay cache is in-memory, per process, and expires entries after 10
+  minutes; a restart forgets which stamps were already used.
 - No configuration files; everything comes from flags and optional secret
   sources.

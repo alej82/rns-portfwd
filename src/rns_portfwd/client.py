@@ -22,6 +22,7 @@ from .constants import (
 )
 from .datagrams import DatagramSession
 from .discovery import (
+    configure_link_stamping,
     init_reticulum,
     parse_destination_hash,
     resolve_identity,
@@ -114,6 +115,8 @@ class PortfwdClient:
         udp_idle_timeout: float = DEFAULT_UDP_IDLE_TIMEOUT,
         verbosity: int = 0,
         client_identity=None,
+        link_stamp_cost: float | None = None,
+        no_link_stamp: bool = False,
     ):
         self.server_hash = server_hash
         self.forwards = forwards
@@ -128,6 +131,8 @@ class PortfwdClient:
         self.udp_idle_timeout = udp_idle_timeout
         self.verbosity = verbosity
         self.client_identity = client_identity
+        self.link_stamp_cost = link_stamp_cost
+        self.no_link_stamp = no_link_stamp
 
         self._stop = threading.Event()
         self._link_ready = threading.Event()
@@ -183,6 +188,12 @@ class PortfwdClient:
     def _connect_once(self) -> None:
         if self._identity is None:
             raise ResolutionError("server identity is not resolved")
+        configure_link_stamping(
+            self.server_hash,
+            self.link_stamp_cost,
+            self.no_link_stamp,
+            self.logger,
+        )
         manager = LinkManager(
             self._identity,
             timeout=self.connect_timeout,
@@ -586,12 +597,17 @@ def run_list(
     wait_seconds: float = 0.0,
     refresh: float = 0.0,
     client_identity=None,
+    link_stamp_cost: float | None = None,
+    no_link_stamp: bool = False,
 ) -> None:
     destination_hash = parse_destination_hash(server_hash_text)
     init_reticulum(config_dir, verbosity)
     try:
         identity = resolve_identity(
             destination_hash, max(path_timeout, wait_seconds)
+        )
+        configure_link_stamping(
+            destination_hash, link_stamp_cost, no_link_stamp, logger
         )
         manager = LinkManager(
             identity,
@@ -644,11 +660,16 @@ def run_probe(
     path_timeout: float = DEFAULT_PATH_TIMEOUT,
     connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
     client_identity=None,
+    link_stamp_cost: float | None = None,
+    no_link_stamp: bool = False,
 ) -> None:
     destination_hash = parse_destination_hash(server_hash_text)
     init_reticulum(config_dir, verbosity)
     try:
         identity = resolve_identity(destination_hash, path_timeout)
+        configure_link_stamping(
+            destination_hash, link_stamp_cost, no_link_stamp, logger
+        )
         manager = LinkManager(
             identity,
             timeout=connect_timeout,

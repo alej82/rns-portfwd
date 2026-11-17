@@ -16,7 +16,10 @@ local TCP connection or UDP flow as a stream over that Link.
 ## Environment
 
 - Python `>=3.10`; the working environment is Python 3.11.14 from pyenv.
-- Runtime dependency: `rns>=1.5.7,<2`.
+- Runtime dependency: `rns>=1.5.7,<2`. Native link-request stamping
+  (`--link-stamp-cost > 0`) requires Reticulum 1.6 (`RNS.Stamps`,
+  `Destination.set_link_cost`); the server and client must feature-gate it and
+  fail with a clear configuration/resolution error on 1.5.x.
 - Always use the pyenv `python3` / `python3 -m pytest`.
 - Do **not** use `/usr/bin/pytest`: it runs Python 3.14 without `RNS` installed.
 - Do not add application config files. Runtime configuration is CLI flags plus
@@ -62,7 +65,7 @@ the system Reticulum daemon.
 | `credits.py` | Byte-credit accounting and window updates |
 | `auth.py` | SHA-256 password comparison and failure tracking |
 | `registry.py` | Exposed-service definitions and lookup |
-| `discovery.py` | Announce payload encoding and validation |
+| `discovery.py` | Announce payload encoding and validation; link-request stamp guard, destination and cost discovery |
 | `link_manager.py` | Link lifecycle and reconnect/backoff helpers |
 | `errors.py`, `logging.py` | Error types, exit codes, secret redaction |
 
@@ -135,6 +138,30 @@ daemon.
   stays anonymous. `rns-portfwd-client identity` prints the public hash for the
   allow-list. Hashes are never announced, returned in responses, or logged below
   `debug`.
+- Link stamping is native and pre-Link: validate `RNS.Stamps` over
+  `destination_hash + signing_public_key` in `StampedDestination.incoming_link_request`
+  before RNS creates the `Link`, signs the proof, registers it, or starts the
+  watchdog. Never move stamp validation into `OPEN`, `/probe`, or `/list`; that
+  does not protect Link establishment.
+- A missing, insufficient, malformed, or replayed stamp must be dropped
+  silently: no Link, no proof, no `OPEN_ERR`, no `AuthTracker` change, debug log
+  only. Accepted `(ephemeral, signing)` key pairs live in a bounded replay cache
+  (TTL 10 minutes, 16384 entries, oldest evicted).
+- Half-open links (`PENDING`/`HANDSHAKE`) are capped by `--max-half-open` (64,
+  `0` unlimited) and their establishment timeout is clamped to
+  `--half-open-timeout` (60 s). These limits apply with stamping disabled and on
+  RNS 1.5.x.
+- `--link-stamp-cost` defaults to `0` and must stay opt-in; cost `> 0` requires
+  `rns>=1.6` at startup. The client reads `stamp_cost` from the announce app data
+  and sets `ALWAYS_STAMP_LRS`/`LR_COST` before the first Link, re-reading the cost
+  on every reconnect, and honoring `--link-stamp-cost` and `--no-link-stamp`.
+- `make_in_destination` pins the native destination link cost even at `0`, so an
+  `enforce_stamps` Reticulum-wide setting cannot impose `LR_COST` on a server
+  that disabled stamping. The client's explicit cost `0` disables both
+  `ALWAYS_STAMP_LRS` and `STAMP_LRS`.
+- The announce may include `stamp_cost` when stamping is enabled. It must never
+  include service names, backend addresses, identity hashes, public/allow-list
+  flags, or the required cost when stamping is disabled.
 - Public services need no entry in the JSON secret document and do not use the
   `-` placeholder. They may be mixed with private services that do use a secret
   source.
