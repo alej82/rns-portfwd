@@ -16,6 +16,10 @@ Reticulum instead of IP.
   (`--max-connections-per-public`, 8 by default).
 - Clients forward to public services with `--forward-public` or
   `--forward-udp-public`; `probe` works without `--service-password`.
+- Per-service identity allow-lists (`--allow-identity`) that restrict access by
+  Reticulum identity hash, independently of the service password. Clients
+  present a persistent identity with `--identity`; anonymous clients remain the
+  default.
 - One Reticulum `Link` per server, multiplexing all forwards and connections.
 - Per-stream byte credits, so a slow consumer cannot block the other streams.
 - Half-close and byte-for-byte fidelity for TCP; datagram boundaries for UDP.
@@ -214,11 +218,81 @@ web                      tcp        no
 ssh                      tcp        yes
 ```
 
-`auth` answers only "does this service check a password?", never the password
-itself. If `probe` is run without `--service-password` against a service that
-requires one, it exits with code 5 and suggests `--service-password`. Anyone who
-knows the server's destination hash can use a public service; see
-[Security notes](#security-notes).
+`auth` answers only "does this service require authorization?", never the
+password itself. If `probe` is run without `--service-password` against a
+service that requires one, it exits with code 5 and suggests
+`--service-password`. Anyone who knows the server's destination hash can use an
+unrestricted public service; see [Security notes](#security-notes).
+
+### 8. Restrict a service to specific identities
+
+`--allow-identity SERVICE:HASH` adds a Reticulum identity hash to a service's
+allow-list. Repeat the flag to allow several identities on the same service.
+The hash is the 32-character hexadecimal identity hash, not a display name:
+
+```bash
+rns-portfwd-server \
+  --expose 127.0.0.1:22:ssh:ssh-password \
+  --allow-identity ssh:0123456789abcdef0123456789abcdef \
+  --allow-identity ssh:fedcba9876543210fedcba9876543210
+```
+
+A client creates its persistent identity once and prints its hash:
+
+```bash
+rns-portfwd-client identity --identity ~/.config/rns-portfwd/client.id
+```
+
+The command prints only the hash. Without `--identity` it uses
+`~/.config/rns-portfwd/client.id`, which is created on first use. Share the
+hash with the server operator, then use the same file on every client command:
+
+```bash
+rns-portfwd-client forward \
+  --server 8ed9308efb95ff5bc8a5253ab9789116 \
+  --forward ssh:2222:ssh-password \
+  --identity ~/.config/rns-portfwd/client.id
+```
+
+`--identity` is also accepted by `list` and `probe`, before or after the
+subcommand. Without it the client stays anonymous, exactly as before. Against a
+service with an allow-list, an anonymous client is rejected no matter which
+password it sends.
+
+The allow-list is an **additional** requirement, not a replacement:
+
+- A password-protected service requires both the password and an allowed
+  identity.
+- A public service (`--expose-public` / `--expose-udp-public`) still ignores the
+  password, but requires an allowed identity.
+- A wrong password or an unlisted identity receives the same authentication
+  error, delay, and failure accounting; an anonymous client is rejected after
+  the identity wait window (5 seconds plus the usual delay). Repeated failures
+  close the Link as before.
+
+Identity proofs travel over Reticulum's own `Link` identification and are
+checked before the backend is opened. An `OPEN` that races the proof is held
+for up to 5 seconds, so a client that identifies immediately after connecting
+works normally.
+
+`/probe` enforces the allow-list too. `/list` still lists every service, but a
+service with a password or an allow-list shows `AUTH yes`; `probe` prints
+`auth=yes` for it:
+
+```
+SERVICE                  PROTOCOL   AUTH
+web                      tcp        yes
+ssh                      tcp        yes
+```
+
+A public service that has an allow-list is no longer unrestricted, so it uses
+`--max-connections-per-service` instead of `--max-connections-per-public`.
+Announces never reveal allow-lists or identity hashes.
+
+An unknown service in `--allow-identity`, or a hash that is not exactly 32
+hexadecimal characters, exits with the configuration code (2) before the server
+starts.
+
 
 ## Secrets without exposing them in `argv`
 
@@ -288,7 +362,7 @@ credentials and not addresses.
 | 0 | Clean shutdown |
 | 1 | Runtime or protocol error |
 | 2 | Invalid command-line configuration |
-| 3 | Reticulum shared instance unavailable |
+| 3 | Reticulum shared instance or identity file unavailable |
 | 4 | Server hash/path could not be resolved |
 | 5 | Authentication or probe failure |
 | 6 | Local bind failure |
@@ -304,16 +378,26 @@ credentials and not addresses.
   Link after repeated failures.
 - The server never reveals backend host/port or service passwords in responses,
   announces, or errors.
-- The client is anonymous at the Reticulum identity layer; a private service's
-  password is the only credential, and a public service has no credential at
-  all. Use long passwords for private services.
-- A public service is usable by anyone who knows the destination hash. There is
-  no client identity or allow-list, only the per-service connection limit, the
-  Link and stream caps, and whatever the backend enforces itself. Public
-  services default to a lower concurrency limit
-  (`--max-connections-per-public`, 8) than password-protected ones.
-- Announces do not reveal which services are public; a client only learns
-  `auth` from `/list` or `/probe`.
+- The client is anonymous at the Reticulum identity layer by default: a private
+  service's password is the only credential, and an unrestricted public service
+  has no credential at all. With `--identity`, the client identifies itself to
+  every server it connects to; the hash is public, but the identity is stable
+  and linkable, so enable it only where an allow-list is needed.
+- An allow-list is checked in addition to the password and before any backend
+  connection. A non-allowed identity receives the same authentication failure
+  and delay as a wrong password, anonymous clients cannot use allow-listed
+  services, and repeated failures close the Link. Identity hashes are public
+  values; `--allow-identity` exposes them in `ps` but never in responses,
+  announces, or logs below `debug`.
+- A public service without an allow-list is usable by anyone who knows the
+  destination hash. There is no identity requirement for it, only the public
+  connection limit, the Link and stream caps, and whatever the backend enforces
+  itself. Public services default to a lower concurrency limit
+  (`--max-connections-per-public`, 8) than password-protected ones; a public
+  service with an allow-list uses `--max-connections-per-service` because
+  access is no longer unrestricted.
+- Announces do not reveal which services are public or allow-listed; a client
+  only learns `auth` from `/list` or `/probe`.
 - Anyone who knows the destination hash can trigger a path response and
   confirm that a stealth server exists. Announces deliberately reveal the
   display name.
@@ -345,7 +429,11 @@ Messages are `RNS.Channel` application messages in the `0xAC00` range:
 | `CLOSE` | `0xAC06` | stream id, reason |
 | `DGRAM` | `0xAC07` | stream id, one datagram payload |
 
-`/list` and `/probe` are Reticulum `Link` requests. Stream ids are 14-bit and
+`/list` and `/probe` are Reticulum `Link` requests. Identity allow-lists reuse
+Reticulum's own Link identification: the initiator calls `Link.identify()` once
+the Link is `ACTIVE`, and the server checks the proved identity before it
+replies to an allow-listed `OPEN` or `/probe`. There is no identity field in the
+application messages and the wire layouts stay unchanged. Stream ids are 14-bit and
 are never reused on a Link. Each stream has an independent byte window; the
 receiver replenishes credit as its local socket drains. The server advertises
 its receive window in `OPEN_OK`; the client advertises the reverse window with a
@@ -377,7 +465,9 @@ marked `slow` and run by default; deselect them with `-m "not slow"`.
 - No reverse forwarding.
 - One server per client process.
 - No TCP or UDP resumption after reconnect.
-- No client identity or allow-list authorization: private services rely only on
-  their password, and public services have no credential at all.
+- Identity allow-lists authorize by Reticulum identity hash only; there is no
+  revocation API, group, or enrollment flow, and an anonymous client cannot use
+  an allow-listed service. Rotating an identity means editing the server flags
+  and restarting it.
 - No configuration files; everything comes from flags and optional secret
   sources.

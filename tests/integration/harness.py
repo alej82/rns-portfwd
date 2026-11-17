@@ -293,6 +293,16 @@ def client_command(instance: SharedInstance, args: list[str], timeout: float = 4
     )
 
 
+def client_identity(instance: SharedInstance, path: Path) -> str:
+    """Create (or load) a client identity file and return its 32-hex hash."""
+    result = client_command(instance, ["identity", "--identity", str(path)])
+    if result.returncode != 0:
+        raise AssertionError(
+            f"client identity command failed ({result.returncode}): {result.stderr}"
+        )
+    return result.stdout.strip()
+
+
 def echo_roundtrip(port: int, payload: bytes, timeout: float = 30) -> bytes:
     sock = socket.create_connection(("127.0.0.1", port), timeout=timeout)
     try:

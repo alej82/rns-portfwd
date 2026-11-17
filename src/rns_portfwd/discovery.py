@@ -52,6 +52,10 @@ def load_or_create_identity(path: str) -> RNS.Identity:
             raise IdentityError(f"could not load identity {target}: {exc}") from None
         if identity is None:
             raise IdentityError(f"identity file {target} is not valid; refusing to replace it")
+        try:
+            os.chmod(target, stat.S_IRUSR | stat.S_IWUSR)
+        except OSError:
+            pass
         return identity
 
     parent = target.parent
@@ -59,6 +63,8 @@ def load_or_create_identity(path: str) -> RNS.Identity:
         parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(parent, stat.S_IRWXU)
         identity = RNS.Identity()
+        fd = os.open(str(target), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(fd)
         identity.to_file(str(target))
         os.chmod(target, stat.S_IRUSR | stat.S_IWUSR)
     except OSError as exc:

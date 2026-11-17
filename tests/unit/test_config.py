@@ -10,8 +10,10 @@ import pytest
 from rns_portfwd.config import (
     Forward,
     Service,
+    apply_allow_identities,
     apply_forward_secrets,
     apply_server_secrets,
+    parse_allow_identity,
     parse_expose,
     parse_expose_public,
     parse_expose_udp,
@@ -20,6 +22,7 @@ from rns_portfwd.config import (
     parse_forward_public,
     parse_forward_udp,
     parse_forward_udp_public,
+    parse_identity_hash,
     read_secret_source,
     resolve_list_password,
     resolve_probe_password,
@@ -27,6 +30,11 @@ from rns_portfwd.config import (
     validate_services,
 )
 from rns_portfwd.errors import ConfigError
+
+HASH_A = "0123456789abcdef0123456789abcdef"
+HASH_B = "fedcba9876543210fedcba9876543210"
+IDENTITY_A = bytes.fromhex(HASH_A)
+IDENTITY_B = bytes.fromhex(HASH_B)
 
 
 def test_parse_expose_password_with_colons():
@@ -279,3 +287,99 @@ def test_read_secret_source_rejects_both_and_invalid(monkeypatch):
     monkeypatch.setattr(sys, "stdin", io.StringIO("not json"))
     with pytest.raises(ConfigError):
         read_secret_source(True, None)
+
+
+def test_service_restriction_property_and_public_auth():
+    private = Service("h", 22, "ssh", "pw")
+    public = Service("h", 80, "web", None)
+    allowed = Service("h", 80, "web", None, allowed_identities=frozenset({IDENTITY_A}))
+    assert private.is_restricted is True
+    assert public.is_restricted is False
+    assert allowed.is_restricted is True
+    assert public.public()["auth"] is False
+    assert private.public()["auth"] is True
+    assert allowed.public()["auth"] is True
+
+
+def test_service_keeps_positional_construction():
+    assert Service("h", 22, "ssh", "pw") == Service(
+        host="h", port=22, name="ssh", password="pw"
+    )
+    assert Service("h", 22, "ssh", "pw").allowed_identities == frozenset()
+
+
+def test_parse_identity_hash_accepts_hex_case_insensitively():
+    assert parse_identity_hash(HASH_A) == IDENTITY_A
+    assert parse_identity_hash(HASH_A.upper()) == IDENTITY_A
+    assert parse_identity_hash(f"  {HASH_B}  ") == IDENTITY_B
+
+
+def test_parse_identity_hash_rejects_bad_values():
+    for value in ("", "xyz", HASH_A[:-1], HASH_A + "0", HASH_A[:-1] + "g", "0x" + HASH_A[:30]):
+        with pytest.raises(ConfigError) as excinfo:
+            parse_identity_hash(value)
+        assert "32" in str(excinfo.value)
+
+
+def test_parse_allow_identity():
+    name, identity = parse_allow_identity(f"ssh:{HASH_A}")
+    assert name == "ssh"
+    assert identity == IDENTITY_A
+    for value in ("ssh", f"bad.name:{HASH_A}", f":{HASH_A}", "ssh:xyz", ""):
+        with pytest.raises(ConfigError):
+            parse_allow_identity(value)
+
+
+def test_apply_allow_identities_accumulates_and_deduplicates():
+    services = [
+        Service("h", 22, "ssh", "pw"),
+        Service("h", 80, "web", None),
+    ]
+    applied = apply_allow_identities(
+        services,
+        [("ssh", IDENTITY_A), ("ssh", IDENTITY_B), ("ssh", IDENTITY_A), ("web", IDENTITY_B)],
+    )
+    assert applied[0].allowed_identities == frozenset({IDENTITY_A, IDENTITY_B})
+    assert applied[0].password == "pw"
+    assert applied[1].allowed_identities == frozenset({IDENTITY_B})
+    assert applied[1].password is None
+    assert applied[1].public()["auth"] is True
+    assert services[0].allowed_identities == frozenset()
+
+
+def test_apply_allow_identities_merges_existing_entries():
+    services = [
+        Service("h", 22, "ssh", "pw", allowed_identities=frozenset({IDENTITY_A}))
+    ]
+    applied = apply_allow_identities(services, [("ssh", IDENTITY_B)])
+    assert applied[0].allowed_identities == frozenset({IDENTITY_A, IDENTITY_B})
+
+
+def test_apply_allow_identities_rejects_unknown_service():
+    services = [Service("h", 22, "ssh", "pw")]
+    with pytest.raises(ConfigError) as excinfo:
+        apply_allow_identities(services, [("nosuch", IDENTITY_A)])
+    assert "nosuch" in str(excinfo.value)
+    assert apply_allow_identities(services, []) == services
+
+
+def test_apply_server_secrets_preserves_allow_lists():
+    services = [
+        Service("h", 22, "ssh", "-", allowed_identities=frozenset({IDENTITY_A})),
+        Service("h", 80, "web", None, allowed_identities=frozenset({IDENTITY_B})),
+    ]
+    resolved, _ = apply_server_secrets(
+        services, None, {"services": {"ssh": "sp"}}, True
+    )
+    assert resolved[0].password == "sp"
+    assert resolved[0].allowed_identities == frozenset({IDENTITY_A})
+    assert resolved[1].allowed_identities == frozenset({IDENTITY_B})
+    assert resolved[1].password is None
+
+    unchanged, _ = apply_server_secrets(
+        [Service("h", 22, "ssh", "inline", allowed_identities=frozenset({IDENTITY_A}))],
+        None,
+        None,
+        False,
+    )
+    assert unchanged[0].allowed_identities == frozenset({IDENTITY_A})

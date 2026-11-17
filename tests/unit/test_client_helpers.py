@@ -5,7 +5,7 @@ import socket
 
 import pytest
 
-from rns_portfwd.client import PortfwdClient, link_request
+from rns_portfwd.client import PortfwdClient, link_request, probe_request
 from rns_portfwd.config import Forward
 from rns_portfwd.errors import BindError
 
@@ -122,9 +122,51 @@ def test_probe_all_accepts_matching_protocol(monkeypatch):
     client._probe_all()
 
 
+def test_probe_request_retries_once_after_identifying(monkeypatch):
+    responses = [
+        {"ok": False, "error": "auth"},
+        {"ok": True, "service": {"name": "ssh", "protocol": "tcp"}},
+    ]
+
+    def fake_request(link, path, data, timeout):
+        return responses.pop(0)
+
+    class FakeIdentityLink:
+        def __init__(self):
+            self.identified = []
+
+        def identify(self, identity):
+            self.identified.append(identity)
+
+    monkeypatch.setattr("rns_portfwd.client.link_request", fake_request)
+    monkeypatch.setattr("rns_portfwd.client.time.sleep", lambda seconds: None)
+    link = FakeIdentityLink()
+    identity = object()
+
+    response = probe_request(link, "ssh", "pw", 1, identity)
+
+    assert response["ok"] is True
+    assert link.identified == [identity]
+    assert responses == []
+
+
+def test_probe_request_does_not_retry_without_identity(monkeypatch):
+    calls = []
+
+    def fake_request(link, path, data, timeout):
+        calls.append(path)
+        return {"ok": False, "error": "auth"}
+
+    monkeypatch.setattr("rns_portfwd.client.link_request", fake_request)
+    assert probe_request(object(), "ssh", "pw", 1, None) == {
+        "ok": False,
+        "error": "auth",
+    }
+    assert calls == ["/probe"]
+
+
 def test_probe_all_sends_empty_password_for_public_forward(monkeypatch):
     seen: list[dict] = []
-
     def fake_request(link, path, data, timeout):
         seen.append(dict(data))
         return {"ok": True, "service": {"name": "web", "protocol": "tcp"}}
@@ -165,3 +207,73 @@ def test_link_closed_clears_ready_and_closes_mux():
     assert client._link_ready.is_set() is False
     assert mux.closed_reason == "link lost"
     assert client.mux is None
+
+
+def test_client_stores_client_identity():
+    client_identity = object()
+    client = PortfwdClient(
+        server_hash=b"0" * 16,
+        forwards=[Forward("echo", 0, "pw")],
+        bind="127.0.0.1",
+        logger=LOGGER,
+        client_identity=client_identity,
+    )
+    assert client.client_identity is client_identity
+
+
+def test_client_default_is_anonymous():
+    assert make_client().client_identity is None
+
+
+def test_connect_once_passes_client_identity_to_link_manager(monkeypatch):
+    captured: dict = {}
+
+    class Manager:
+        def __init__(
+            self,
+            identity,
+            timeout=None,
+            on_closed=None,
+            client_identity=None,
+            logger=None,
+        ):
+            captured["server_identity"] = identity
+            captured["timeout"] = timeout
+            captured["on_closed"] = on_closed
+            captured["client_identity"] = client_identity
+            captured["logger"] = logger
+
+        def open(self):
+            return OpenedLink()
+
+    class OpenedLink:
+        def get_channel(self):
+            return object()
+
+    class MuxFactory:
+        def __init__(self, **kwargs):
+            captured["mux"] = kwargs
+
+    monkeypatch.setattr("rns_portfwd.client.LinkManager", Manager)
+    monkeypatch.setattr("rns_portfwd.client.Mux", MuxFactory)
+    monkeypatch.setattr("rns_portfwd.client.register_message_types", lambda channel: None)
+
+    client_identity = object()
+    server_identity = object()
+    client = PortfwdClient(
+        server_hash=b"0" * 16,
+        forwards=[Forward("echo", 0, "pw")],
+        bind="127.0.0.1",
+        logger=LOGGER,
+        connect_timeout=7.0,
+        client_identity=client_identity,
+    )
+    client._identity = server_identity
+    client._connect_once()
+
+    assert captured["server_identity"] is server_identity
+    assert captured["client_identity"] is client_identity
+    assert captured["logger"] is LOGGER
+    assert captured["timeout"] == 7.0
+    assert client.link_manager is not None
+    assert client.mux is not None

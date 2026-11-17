@@ -108,22 +108,41 @@ daemon.
 - `Service.password` and `Forward.password` are `str | None`; `None` marks a
   public service or forward. A service declared with `--expose-public` /
   `--expose-udp-public` authorizes any `OPEN` or `/probe` password, including an
-  empty one. That is not an authentication failure: do not increment
-  `AuthTracker` or delay an `OPEN_ERR` for it.
-- `/list` and `/probe` report a public service with `"auth": false`. Announces
-  never reveal which services are public; the announce `auth` field only
-  reflects whether enumeration is enabled.
+  empty one. For a public service without an identity allow-list that is not an
+  authentication failure: do not increment `AuthTracker` or delay an `OPEN_ERR`
+  for it. When the public service has an allow-list, the password still does not
+  matter, but an anonymous or unlisted identity is a normal auth failure.
+- `/list` and `/probe` report an unrestricted public service with `"auth": false`;
+  a service with a password or an identity allow-list is `"auth": true`.
+  Announces never reveal which services are public or allow-listed; the announce
+  `auth` field only reflects whether enumeration is enabled.
 - Public services are bounded by `--max-connections-per-public` (8 by default),
   not `--max-connections-per-service`. UDP sessions on a public service count
-  against the public limit too.
+  against the public limit too. A public service with an identity allow-list is
+  restricted, so it uses `--max-connections-per-service` instead.
+- Per-service identity allow-lists (`Service.allowed_identities`, canonical
+  16-byte Reticulum hashes) are an additional check on `OPEN`, `/probe`, and UDP
+  sessions: an allow-listed service authorizes only a Link whose initiator
+  identified itself with an allowed hash, and a password-protected service still
+  checks the password. A rejection must be indistinguishable from a wrong
+  password: same `OPEN_ERR` code, delay, `AuthTracker` accounting, and teardown.
+  Anonymous clients are rejected by allow-listed services.
+- The server learns the caller identity from Reticulum Link identification, not
+  from an application message. An `OPEN` for an allow-listed service that races
+  the identification is held for up to `IDENTITY_WAIT_TIMEOUT` (5 s), bounded per
+  Link by `--max-streams`, then rejected through the normal auth-failure path.
+- The client identifies itself only when `--identity PATH` is given; otherwise it
+  stays anonymous. `rns-portfwd-client identity` prints the public hash for the
+  allow-list. Hashes are never announced, returned in responses, or logged below
+  `debug`.
 - Public services need no entry in the JSON secret document and do not use the
   `-` placeholder. They may be mixed with private services that do use a secret
   source.
 - Never expose backend host/port or passwords in responses, announces, logs, or
   errors. Redact registered secrets.
 - Address servers only by destination hash; display names are labels.
-- Exit codes: `0` clean, `1` runtime/protocol, `2` config, `3` shared instance,
-  `4` resolution/hash, `5` auth/probe, `6` bind.
+- Exit codes: `0` clean, `1` runtime/protocol, `2` config,
+  `3` shared instance/identity, `4` resolution/hash, `5` auth/probe, `6` bind.
 
 ## Code conventions
 

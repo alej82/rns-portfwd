@@ -7,12 +7,14 @@ import os
 import re
 import socket
 import sys
-from dataclasses import dataclass
+from collections import defaultdict
+from dataclasses import dataclass, replace
 
 from .constants import NAME_PATTERN
 from .errors import ConfigError
 
 _NAME_RE = re.compile(rf"^{NAME_PATTERN}$")
+_IDENTITY_HASH_RE = re.compile(r"[0-9A-Fa-f]{32}")
 _SECRET_PLACEHOLDER = "-"
 _MAX_SECRET_DOC = 1024 * 1024
 
@@ -24,12 +26,17 @@ class Service:
     name: str
     password: str | None
     protocol: str = "tcp"
+    allowed_identities: frozenset[bytes] = frozenset()
+
+    @property
+    def is_restricted(self) -> bool:
+        return self.password is not None or bool(self.allowed_identities)
 
     def public(self) -> dict:
         return {
             "name": self.name,
             "protocol": self.protocol,
-            "auth": self.password is not None,
+            "auth": self.is_restricted,
         }
 
 
@@ -58,6 +65,28 @@ def validate_secret(value: str, field: str) -> str:
     if len(value.encode("utf-8")) > _MAX_SECRET_LEN:
         raise ConfigError(f"{field} is too long (max {_MAX_SECRET_LEN} bytes)")
     return value
+
+
+def parse_identity_hash(value: str) -> bytes:
+    """Parse a 32-hexadecimal-character Reticulum identity hash."""
+    text = value.strip() if isinstance(value, str) else ""
+    if not _IDENTITY_HASH_RE.fullmatch(text):
+        raise ConfigError(
+            f"invalid identity hash {value!r}: expected a 32-hexadecimal-character "
+            "identity hash"
+        )
+    return bytes.fromhex(text)
+
+
+def parse_allow_identity(value: str) -> tuple[str, bytes]:
+    """Parse a ``SERVICE:HASH`` allow-list entry."""
+    if not isinstance(value, str):
+        raise ConfigError(f"invalid --allow-identity {value!r}: expected SERVICE:HASH")
+    name, separator, hash_text = value.partition(":")
+    if not separator:
+        raise ConfigError(f"invalid --allow-identity {value!r}: expected SERVICE:HASH")
+    validate_name(name)
+    return name, parse_identity_hash(hash_text)
 
 
 def _parse_port(value: str, *, allow_zero: bool, field: str) -> int:
@@ -177,6 +206,41 @@ def parse_forward_public(value: str) -> Forward:
 
 def parse_forward_udp_public(value: str) -> Forward:
     return _parse_forward_public(value, "udp")
+
+
+def validate_allow_identities(
+    services: list[Service], entries: list[tuple[str, bytes]]
+) -> None:
+    """Reject allow-list entries that name a service the server does not expose."""
+    known = {service.name for service in services}
+    for name, _ in entries:
+        if name not in known:
+            raise ConfigError(f"--allow-identity names unknown service {name!r}")
+
+
+def apply_allow_identities(
+    services: list[Service], entries: list[tuple[str, bytes]]
+) -> list[Service]:
+    """Add identity hashes to service allow-lists, rebuilding frozen services."""
+    if not entries:
+        return services
+    validate_allow_identities(services, entries)
+    additions: dict[str, set[bytes]] = defaultdict(set)
+    for name, identity_hash in entries:
+        additions[name].add(identity_hash)
+    resolved: list[Service] = []
+    for service in services:
+        extra = additions.get(service.name)
+        if not extra:
+            resolved.append(service)
+            continue
+        resolved.append(
+            replace(
+                service,
+                allowed_identities=service.allowed_identities | frozenset(extra),
+            )
+        )
+    return resolved
 
 
 def validate_services(services: list[Service]) -> None:
@@ -302,6 +366,7 @@ def apply_server_secrets(
                 else None
             ),
             protocol=s.protocol,
+            allowed_identities=s.allowed_identities,
         )
         for s in services
     ]
