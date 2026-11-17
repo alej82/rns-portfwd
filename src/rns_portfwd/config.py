@@ -23,9 +23,10 @@ class Service:
     port: int
     name: str
     password: str
+    protocol: str = "tcp"
 
     def public(self) -> dict:
-        return {"name": self.name, "protocol": "tcp", "auth": True}
+        return {"name": self.name, "protocol": self.protocol, "auth": True}
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,7 @@ class Forward:
     name: str
     local_port: int
     password: str
+    protocol: str = "tcp"
 
 
 _MAX_SECRET_LEN = 4096
@@ -65,7 +67,7 @@ def _parse_port(value: str, *, allow_zero: bool, field: str) -> int:
     return port
 
 
-def parse_expose(value: str) -> Service:
+def _parse_expose(value: str, protocol: str) -> Service:
     if value.startswith("["):
         end = value.find("]")
         if end < 0:
@@ -90,10 +92,18 @@ def parse_expose(value: str) -> Service:
     port = _parse_port(port_text, allow_zero=False, field="backend")
     validate_name(name)
     validate_secret(password, "service password")
-    return Service(host=host, port=port, name=name, password=password)
+    return Service(host=host, port=port, name=name, password=password, protocol=protocol)
 
 
-def parse_forward(value: str) -> Forward:
+def parse_expose(value: str) -> Service:
+    return _parse_expose(value, "tcp")
+
+
+def parse_expose_udp(value: str) -> Service:
+    return _parse_expose(value, "udp")
+
+
+def _parse_forward(value: str, protocol: str) -> Forward:
     fields = value.split(":", 2)
     if len(fields) != 3:
         raise ConfigError("expected name:local_port:password")
@@ -101,7 +111,15 @@ def parse_forward(value: str) -> Forward:
     validate_name(name)
     port = _parse_port(port_text, allow_zero=True, field="local")
     validate_secret(password, "forward password")
-    return Forward(name=name, local_port=port, password=password)
+    return Forward(name=name, local_port=port, password=password, protocol=protocol)
+
+
+def parse_forward(value: str) -> Forward:
+    return _parse_forward(value, "tcp")
+
+
+def parse_forward_udp(value: str) -> Forward:
+    return _parse_forward(value, "udp")
 
 
 def validate_services(services: list[Service]) -> None:
@@ -117,13 +135,16 @@ def validate_services(services: list[Service]) -> None:
 def validate_forwards(forwards: list[Forward]) -> None:
     if not forwards:
         raise ConfigError("at least one --forward is required")
-    used: set[int] = set()
+    used: set[tuple[str, int]] = set()
     for forward in forwards:
         if forward.local_port == 0:
             continue
-        if forward.local_port in used:
-            raise ConfigError(f"duplicate local port {forward.local_port}")
-        used.add(forward.local_port)
+        key = (forward.protocol, forward.local_port)
+        if key in used:
+            raise ConfigError(
+                f"duplicate local {forward.protocol} port {forward.local_port}"
+            )
+        used.add(key)
 
 
 def read_secret_source(password_stdin: bool, secrets_fd: int | None) -> tuple[dict | None, bool]:
@@ -213,7 +234,13 @@ def apply_server_secrets(
         )
 
     resolved_services = [
-        Service(host=s.host, port=s.port, name=s.name, password=_doc_service(document, s.name))
+        Service(
+            host=s.host,
+            port=s.port,
+            name=s.name,
+            password=_doc_service(document, s.name),
+            protocol=s.protocol,
+        )
         for s in services
     ]
     resolved_list = _doc_list_password(document) if list_password == _SECRET_PLACEHOLDER else None
@@ -246,6 +273,7 @@ def apply_forward_secrets(
             name=f.name,
             local_port=f.local_port,
             password=_doc_service(document, f.name),
+            protocol=f.protocol,
         )
         for f in forwards
     ]

@@ -23,6 +23,14 @@ def free_port() -> int:
     return port
 
 
+def free_udp_port() -> int:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    return port
+
+
 class SharedInstance:
     def __init__(self, root: Path):
         self.root = root
@@ -109,6 +117,32 @@ class TCPServer:
         self.server.server_close()
 
 
+class UDPServer:
+    def __init__(self):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind(("127.0.0.1", 0))
+        self.port = self.sock.getsockname()[1]
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def _serve(self):
+        while True:
+            try:
+                data, peer = self.sock.recvfrom(65536)
+            except OSError:
+                return
+            try:
+                self.sock.sendto(data, peer)
+            except OSError:
+                return
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
 class Process:
     def __init__(self, args: list[str]):
         self.proc = subprocess.Popen(
@@ -172,6 +206,7 @@ def start_server(
     extra: list[str] | None = None,
     password: str = "secret",
     list_password: str = "listpass",
+    udp_services: dict[str, int] | None = None,
 ) -> tuple[Process, str]:
     identity = instance.root / "server.id"
     args = [
@@ -189,6 +224,8 @@ def start_server(
     ]
     for name, port in services.items():
         args += ["--expose", f"127.0.0.1:{port}:{name}:{password}"]
+    for name, port in (udp_services or {}).items():
+        args += ["--expose-udp", f"127.0.0.1:{port}:{name}:{password}"]
     args += extra or []
     process = Process(args)
     line = process.wait_for("destination:", timeout=30)
@@ -200,6 +237,7 @@ def start_client(
     server_hash: str,
     forwards: list[str],
     extra: list[str] | None = None,
+    udp_forwards: list[str] | None = None,
 ) -> Process:
     args = [
         sys.executable,
@@ -213,9 +251,11 @@ def start_client(
     ]
     for forward in forwards:
         args += ["--forward", forward]
+    for forward in udp_forwards or []:
+        args += ["--forward-udp", forward]
     args += extra or []
     process = Process(args)
-    for _ in forwards:
+    for _ in range(len(forwards) + len(udp_forwards or [])):
         process.wait_for(" -> ", timeout=30)
     process.wait_for("client ready", timeout=30)
     return process
@@ -247,6 +287,17 @@ def echo_roundtrip(port: int, payload: bytes, timeout: float = 30) -> bytes:
                 break
             chunks.append(data)
         return b"".join(chunks)
+    finally:
+        sock.close()
+
+
+def udp_roundtrip(port: int, payload: bytes, timeout: float = 30) -> bytes:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    sock.connect(("127.0.0.1", port))
+    try:
+        sock.send(payload)
+        return sock.recv(65536)
     finally:
         sock.close()
 

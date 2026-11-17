@@ -13,6 +13,7 @@ from .constants import (
     MAX_CREDIT,
     MSG_CLOSE,
     MSG_DATA,
+    MSG_DGRAM,
     MSG_OPEN,
     MSG_OPEN_ERR,
     MSG_OPEN_OK,
@@ -214,6 +215,27 @@ class CloseMessage(RNS.MessageBase):
         _check_close_reason(self.reason)
 
 
+class DatagramMessage(RNS.MessageBase):
+    MSGTYPE = MSG_DGRAM
+
+    def __init__(self, stream_id=None, data=None):
+        self.stream_id = stream_id
+        self.data = data if data is not None else b""
+
+    def pack(self) -> bytes:
+        if not isinstance(self.data, (bytes, bytearray)):
+            raise ProtocolError("DGRAM payload must be bytes")
+        return struct.pack(">H", _check_stream_id(self.stream_id)) + bytes(self.data)
+
+    def unpack(self, raw: bytes):
+        if len(raw) < 2:
+            raise ProtocolError("DGRAM message is too short")
+        stream_id = struct.unpack(">H", raw[:2])[0]
+        _check_stream_id(stream_id)
+        self.stream_id = stream_id
+        self.data = raw[2:]
+
+
 MESSAGE_TYPES = (
     OpenMessage,
     OpenOkMessage,
@@ -221,6 +243,7 @@ MESSAGE_TYPES = (
     DataMessage,
     WindowMessage,
     CloseMessage,
+    DatagramMessage,
 )
 
 

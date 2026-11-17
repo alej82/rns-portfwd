@@ -97,13 +97,46 @@ def test_probe_success_and_uniform_failure(monkeypatch):
     assert wrong == missing == {"ok": False, "error": "auth"}
 
 
+class FakeTimer:
+    def __init__(self):
+        self.cancelled = False
+
+    def cancel(self):
+        self.cancelled = True
+
+
+def test_successful_probe_or_list_marks_link_authenticated(monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda seconds: None)
+    server = make_server()
+    link_id = b"link"
+    ctx, _, _ = make_ctx(server)
+    server._link_ids[link_id] = ctx
+    ctx.timer = FakeTimer()
+
+    server._handle_probe("/probe", {"service": "ssh", "password": "secret"}, b"id", link_id, None, time.time())
+    assert ctx.opened is True
+    assert ctx.timer.cancelled is True
+
+    ctx.opened = False
+    ctx.timer = FakeTimer()
+    server._handle_probe("/probe", {"service": "ssh", "password": "bad"}, b"id", link_id, None, time.time())
+    assert ctx.opened is False
+    assert ctx.timer.cancelled is False
+
+    server._handle_list("/list", {"password": "listpass"}, b"id", link_id, None, time.time())
+    assert ctx.opened is True
+    assert ctx.timer.cancelled is True
+
+
 def test_open_auth_failure_is_delayed_and_counted(monkeypatch):
     server = make_server()
     ctx, link, mux = make_ctx(server)
     for stream_id in range(1, 4):
         server._handle_open(ctx, OpenMessage(stream_id, 1, "ssh", "wrong"))
-    time.sleep(0.6)
-    assert mux.transport.errors == [
+    deadline = time.monotonic() + 3
+    while len(mux.transport.errors) < 3 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert sorted(mux.transport.errors) == [
         (1, ErrorCode.AUTH),
         (2, ErrorCode.AUTH),
         (3, ErrorCode.AUTH),

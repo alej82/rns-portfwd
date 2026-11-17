@@ -1,19 +1,21 @@
 # rns-portfwd
 
-Multiplexed TCP port forwarding over [Reticulum](https://reticulum.network/).
+Multiplexed TCP and UDP port forwarding over [Reticulum](https://reticulum.network/).
 
-`rns-portfwd-server` exposes named TCP services from a machine reachable over a
-Reticulum mesh. `rns-portfwd-client` resolves that server by destination hash,
-opens one `Link`, and maps every local TCP connection to a stream over that
-Link. It is similar in spirit to `ssh -L`, but over Reticulum instead of IP.
+`rns-portfwd-server` exposes named TCP and UDP services from a machine
+reachable over a Reticulum mesh. `rns-portfwd-client` resolves that server by
+destination hash, opens one `Link`, and maps every local TCP connection or UDP
+flow to a stream over that `Link`. It is similar in spirit to `ssh -L`, but over
+Reticulum instead of IP.
 
 ## Features
 
-- Named services with an independent password per service.
+- Named TCP and UDP services with an independent password per service.
 - One Reticulum `Link` per server, multiplexing all forwards and connections.
 - Per-stream byte credits, so a slow consumer cannot block the other streams.
-- Half-close and byte-for-byte fidelity in both directions.
-- Optional per-payload bz2 compression.
+- Half-close and byte-for-byte fidelity for TCP; datagram boundaries for UDP.
+- UDP listeners map each local source address to its own session (NAT-like).
+- Optional per-payload bz2 compression for TCP.
 - Stealth by default: no announces unless `--announce` is used; clients address
   servers by destination hash.
 - Private enumeration: `/list` is disabled unless `--list-password` is set.
@@ -54,23 +56,28 @@ If you use a custom configuration directory, pass it to both applications with
 ```bash
 rns-portfwd-server \
   --expose 127.0.0.1:22:ssh:'correct horse battery staple' \
+  --expose-udp 127.0.0.1:5353:dns:dns-password \
   --expose 127.0.0.1:5432:db:db-password \
   --list-password list-password \
   --name my-server
 ```
 
-`--expose` accepts `host:port:name:password`. The password may contain `:`
-because it consumes the rest of the field. IPv6 hosts must be bracketed:
+`--expose` accepts `host:port:name:password` for TCP and `--expose-udp` accepts
+the same format for UDP. The password may contain `:` because it consumes the
+rest of the field. IPv6 hosts must be bracketed:
 
 ```bash
 rns-portfwd-server --expose '[::1]:5432:db:secret'
+rns-portfwd-server --expose-udp '[::1]:5353:dns:secret'
 ```
+
+Service names must be unique across TCP and UDP.
 
 At startup the server prints its destination hash:
 
 ```
 destination: 8ed9308efb95ff5bc8a5253ab9789116
-services: ssh, db
+services: ssh, dns, db
 ```
 
 Share that hash and the service passwords out of band. The default identity
@@ -116,12 +123,42 @@ Several forwards share one Link:
 rns-portfwd-client forward \
   --server 8ed9308efb95ff5bc8a5253ab9789116 \
   --forward ssh:2222:ssh-password \
+  --forward-udp dns:5353:dns-password \
   --forward db:15432:db-password
 ```
 
 Use `--forward name:0:password` to request an ephemeral local port; the client
 prints the port it obtained. The default bind address is `127.0.0.1`; change it
 with `--bind`.
+
+### 6. Forward a local UDP port
+
+```bash
+rns-portfwd-client forward \
+  --server 8ed9308efb95ff5bc8a5253ab9789116 \
+  --forward-udp dns:5353:dns-password
+```
+
+Then send datagrams locally:
+
+```bash
+dig @127.0.0.1 -p 5353 example.com
+```
+
+The local UDP listener is NAT-like: each source address and port gets its own
+remote session and its own backend socket, so several local processes can use
+the same forward. Replies go only to the source that sent the datagram. A
+session closes after `--udp-idle-timeout` seconds without traffic (60 by
+default); a later datagram from the same source creates a new session.
+
+Each datagram must fit in one Channel message, which is also capped by the
+peer's credit window (`--window`, 16 KiB by default). Larger datagrams are
+dropped and logged: there is no application-level fragmentation. On a fast
+Reticulum link the limit is several kilobytes; on LoRa it is a few hundred
+bytes. UDP datagrams are carried reliably and in order by the Channel, which is
+stricter than IP UDP; there is no loss, duplication or reordering to recover
+from. UDP has no half-close or resume: sessions close on idle timeout or Link
+loss, and new datagrams open new sessions after reconnection.
 
 ## Secrets without exposing them in `argv`
 
@@ -150,7 +187,8 @@ printf '%s' '{"services": {"ssh": "sp", "db": "dp"}}' |
 ```
 
 For `list` the document is `{"list_password": "..."}`. For `probe` use
-`{"services": {"<name>": "<password>"}}`.
+`{"services": {"<name>": "<password>"}}`. UDP services and forwards use the same
+document and key by service name.
 
 Inline and external secrets cannot be mixed: when a secret source is used, all
 passwords must be `-`. Logs and error messages redact registered secrets.
@@ -197,9 +235,9 @@ credentials and not addresses.
   display name.
 - Backend connections time out; stream counts, Link counts, and per-service
   connections are bounded.
-- TCP connections are not resumed after a Link drop. Live streams are closed,
-  listeners stay up, and the client reconnects with exponential backoff; new
-  connections wait up to `--connect-timeout`.
+- TCP connections are not resumed after a Link drop. Live streams and UDP
+  sessions are closed, listeners stay up, and the client reconnects with
+  exponential backoff; new connections wait up to `--connect-timeout`.
 
 ### LoRa and other slow links
 
@@ -221,6 +259,7 @@ Messages are `RNS.Channel` application messages in the `0xAC00` range:
 | `DATA` | `0xAC04` | stream id, eof/compressed flags, bytes |
 | `WINDOW` | `0xAC05` | stream id, additional credit |
 | `CLOSE` | `0xAC06` | stream id, reason |
+| `DGRAM` | `0xAC07` | stream id, one datagram payload |
 
 `/list` and `/probe` are Reticulum `Link` requests. Stream ids are 14-bit and
 are never reused on a Link. Each stream has an independent byte window; the
@@ -228,6 +267,9 @@ receiver replenishes credit as its local socket drains. The server advertises
 its receive window in `OPEN_OK`; the client advertises the reverse window with a
 `WINDOW` immediately after `OPEN_OK`. Compression is chosen per payload and is
 signalled with the `compressed` flag; decompressed payloads are size-limited.
+`DGRAM` messages carry exactly one UDP datagram, are never compressed, are
+never split or coalesced, and are counted against the same per-stream byte
+credit as TCP data.
 
 ## Development
 
@@ -244,10 +286,13 @@ marked `slow` and run by default; deselect them with `-m "not slow"`.
 
 ## Limitations (v1)
 
-- TCP only; no UDP.
-- Local forwarding only; no reverse forwarding.
+- UDP datagrams larger than one Channel message or the peer's credit window are
+  dropped; there is no fragmentation.
+- UDP has no broadcast or multicast forwarding, and a backend that replies from
+  a different address or port than the exposed one is not supported.
+- No reverse forwarding.
 - One server per client process.
-- No TCP connection resumption after reconnect.
+- No TCP or UDP resumption after reconnect.
 - No client identity/allow-list authorization beyond per-service passwords.
 - No configuration files; everything comes from flags and optional secret
   sources.

@@ -13,7 +13,9 @@ from rns_portfwd.config import (
     apply_forward_secrets,
     apply_server_secrets,
     parse_expose,
+    parse_expose_udp,
     parse_forward,
+    parse_forward_udp,
     read_secret_source,
     resolve_list_password,
     resolve_probe_password,
@@ -54,6 +56,23 @@ def test_parse_expose_rejects_bad_fields():
             parse_expose(value)
 
 
+def test_parse_udp_service_and_forward_set_protocol():
+    service = parse_expose_udp("[::1]:5353:dns:pa:ss")
+    assert service == Service("::1", 5353, "dns", "pa:ss", protocol="udp")
+    assert service.public() == {"name": "dns", "protocol": "udp", "auth": True}
+    forward = parse_forward_udp("dns:0:pa:ss")
+    assert forward == Forward("dns", 0, "pa:ss", protocol="udp")
+
+
+def test_parse_udp_rejects_bad_fields():
+    for value in ("host:53:dns", "host:0:dns:x", "host:70000:dns:x", "bad.name:53:x"):
+        with pytest.raises(ConfigError):
+            parse_expose_udp(value)
+    for value in ("dns:5353", "bad.name:5353:x", "dns:-1:x", "dns:70000:x"):
+        with pytest.raises(ConfigError):
+            parse_forward_udp(value)
+
+
 def test_parse_forward_and_zero_port():
     forward = parse_forward("ssh:0:pa:ss")
     assert forward == Forward("ssh", 0, "pa:ss")
@@ -69,6 +88,13 @@ def test_validate_services_rejects_duplicates():
     services = [Service("h", 1, "ssh", "a"), Service("h", 2, "ssh", "b")]
     with pytest.raises(ConfigError):
         validate_services(services)
+    with pytest.raises(ConfigError):
+        validate_services(
+            [
+                Service("h", 1, "dns", "a"),
+                Service("h", 2, "dns", "b", protocol="udp"),
+            ]
+        )
 
 
 def test_validate_forwards_rejects_duplicate_ports_but_allows_zero():
@@ -77,12 +103,38 @@ def test_validate_forwards_rejects_duplicate_ports_but_allows_zero():
         validate_forwards([Forward("a", 10, "x"), Forward("b", 10, "y")])
 
 
+def test_validate_forwards_allows_same_port_for_tcp_and_udp():
+    validate_forwards(
+        [Forward("a", 10, "x"), Forward("b", 10, "y", protocol="udp")]
+    )
+    with pytest.raises(ConfigError):
+        validate_forwards(
+            [
+                Forward("a", 10, "x", protocol="udp"),
+                Forward("b", 10, "y", protocol="udp"),
+            ]
+        )
+
+
 def test_apply_server_secrets():
     services = [Service("h", 22, "ssh", "-")]
     document = {"list_password": "lp", "services": {"ssh": "sp"}}
     resolved, list_password = apply_server_secrets(services, "-", document, True)
     assert resolved[0].password == "sp"
     assert list_password == "lp"
+
+
+def test_apply_secrets_preserve_protocol():
+    services = [Service("h", 5353, "dns", "-", protocol="udp")]
+    resolved, _ = apply_server_secrets(
+        services, None, {"services": {"dns": "sp"}}, True
+    )
+    assert resolved[0].protocol == "udp"
+    forwards = [Forward("dns", 5353, "-", protocol="udp")]
+    resolved_forwards = apply_forward_secrets(
+        forwards, {"services": {"dns": "pw"}}, True
+    )
+    assert resolved_forwards[0].protocol == "udp"
 
 
 def test_server_secrets_reject_ambiguity_and_missing():

@@ -30,6 +30,9 @@ class FakeStream:
     def on_remote_data(self, data, eof, compressed):
         self.events.append(("data", data, eof, compressed))
 
+    def on_remote_datagram(self, data):
+        self.events.append(("dgram", data))
+
     def on_window(self, credit):
         self.events.append(("window", credit))
 
@@ -86,6 +89,7 @@ def test_reserve_install_and_limit():
 def test_handle_dispatches_messages():
     from rns_portfwd.protocol import (
         CloseMessage,
+        DatagramMessage,
         DataMessage,
         OpenErrMessage,
         OpenOkMessage,
@@ -97,18 +101,28 @@ def test_handle_dispatches_messages():
     assert mux.reserve(1)
     assert mux.install(1, stream)  # type: ignore[arg-type]
     mux.handle(DataMessage(1, b"hi", eof=True, compressed=True))
+    mux.handle(DatagramMessage(1, b"dg"))
     mux.handle(WindowMessage(1, 50))
     mux.handle(OpenOkMessage(1, 100))
     mux.handle(OpenErrMessage(1, 1))
     mux.handle(CloseMessage(1, 2))
     assert stream.events == [
         ("data", b"hi", True, True),
+        ("dgram", b"dg"),
         ("window", 50),
         ("ok", 100),
         ("err", 1),
         ("close", 2),
     ]
     assert channel.handlers == [mux.handle]
+
+
+def test_datagram_for_unknown_stream_is_ignored():
+    from rns_portfwd.protocol import DatagramMessage
+
+    mux, _ = make_mux()
+    assert mux.handle(DatagramMessage(99, b"orphan")) is True
+    assert mux.count == 0
 
 
 def test_open_message_goes_to_handler():

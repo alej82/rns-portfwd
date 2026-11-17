@@ -10,7 +10,7 @@ import time
 import pytest
 
 from rns_portfwd.errors import ProtocolError
-from rns_portfwd.protocol import DataMessage
+from rns_portfwd.protocol import DatagramMessage, DataMessage
 from rns_portfwd.streams import ChannelTransport, StreamSession, decompress_payload
 
 LOGGER = logging.getLogger("test.streams")
@@ -68,6 +68,7 @@ def test_transport_sends_open_and_window():
     transport.send_open_ok(1, 1024)
     transport.send_open_err(1, 1)
     transport.send_window(1, 512)
+    transport.send_datagram(1, b"payload")
     transport.send_close(1, 2)
     kinds = [type(m).__name__ for m in channel.sent]
     assert kinds == [
@@ -75,9 +76,24 @@ def test_transport_sends_open_and_window():
         "OpenOkMessage",
         "OpenErrMessage",
         "WindowMessage",
+        "DatagramMessage",
         "CloseMessage",
     ]
     assert channel.mdu - 3 == transport.max_payload()
+    assert channel.mdu - 2 == transport.max_datagram()
+
+
+def test_transport_sends_datagram_as_one_uncompressed_message():
+    channel = FakeChannel()
+    transport = ChannelTransport(channel, compress=True)
+    payload = b"a" * 200
+    transport.send_datagram(4, payload)
+    assert len(channel.sent) == 1
+    message = channel.sent[0]
+    assert isinstance(message, DatagramMessage)
+    assert message.stream_id == 4
+    assert message.data == payload
+    assert not hasattr(message, "compressed")
 
 
 def test_transport_compresses_only_when_smaller():

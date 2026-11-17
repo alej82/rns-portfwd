@@ -4,10 +4,10 @@ Guidance for coding agents working in this repository.
 
 ## Project
 
-`rns-portfwd` is a Python package that forwards TCP through Reticulum. The server
-exports named, password-protected services; the client resolves a 32-hex
-destination hash, opens one `Link`, and multiplexes every local TCP connection
-as a stream over that Link.
+`rns-portfwd` is a Python package that forwards TCP and UDP through Reticulum.
+The server exports named, password-protected services; the client resolves a
+32-hex destination hash, opens one `Link`, and multiplexes every local TCP
+connection or UDP flow as a stream over that Link.
 
 - User docs: `README.md`
 - Package source: `src/rns_portfwd/`
@@ -57,7 +57,8 @@ the system Reticulum daemon.
 | `server.py` | Destination, Link setup, `/list`, `/probe`, service auth, backend opens |
 | `client.py` | Resolution, listeners, probes, forwarding, reconnect loop |
 | `mux.py` | Per-Link stream table, 14-bit stream-id allocation, limits |
-| `streams.py` | `ChannelTransport`, `StreamSession`, credits, compression, half-close |
+| `streams.py` | `ChannelTransport`, `SessionBase`, `StreamSession`, credits, compression, half-close |
+| `datagrams.py` | `DatagramSession`: UDP flows, datagram queues, credit, idle close |
 | `credits.py` | Byte-credit accounting and window updates |
 | `auth.py` | SHA-256 password comparison and failure tracking |
 | `registry.py` | Exposed-service definitions and lookup |
@@ -66,27 +67,39 @@ the system Reticulum daemon.
 | `errors.py`, `logging.py` | Error types, exit codes, secret redaction |
 
 `tests/integration/harness.py` owns the isolated `rnsd`, process wrappers, and
-echo/bulk TCP backends. Reuse it instead of starting a system daemon.
+echo/bulk TCP plus UDP echo backends. Reuse it instead of starting a system
+daemon.
 
 ## Protocol invariants
 
 - Messages are `RNS.Channel` application messages in the `0xAC00` range:
   `OPEN=0xAC01`, `OPEN_OK=0xAC02`, `OPEN_ERR=0xAC03`, `DATA=0xAC04`,
-  `WINDOW=0xAC05`, `CLOSE=0xAC06`.
+  `WINDOW=0xAC05`, `CLOSE=0xAC06`, `DGRAM=0xAC07`.
 - `OPEN` carries the 14-bit `stream_id`; do not drop or reorder it.
+- `DGRAM` carries exactly one UDP datagram. Never split, coalesce, truncate or
+  compress it. Deliver only whole datagrams and preserve their order within a
+  session. Drop datagrams larger than `channel.mdu - 2` or the peer's credit
+  window instead of fragmenting them.
 - Stream ids are monotonic and never reused on a Link. Exhaustion closes the
   Link and triggers reconnect.
 - The server grants client-to-server credit in `OPEN_OK`. The client grants the
   reverse direction with a `WINDOW` immediately after `OPEN_OK`.
 - Credits are per stream; a blocked consumer must not block other streams.
-  Preserve half-close and byte-for-byte delivery.
+  Preserve half-close and byte-for-byte delivery for TCP, and datagram
+  boundaries for UDP.
+- UDP sessions count toward `--max-streams` and the per-service connection
+  limit. Use a bounded per-session queue and drop rather than block the
+  listener. Close idle sessions after `--udp-idle-timeout` and release the
+  service slot.
 - `ChannelTransport._send` retries `CEType.ME_LINK_NOT_READY` for up to 30 s and
   must stop retrying when the mux/link closes.
 - Compression is opportunistic per payload (bz2, flag in `DATA`) and capped at
-  1 MiB after decompression.
-- One Link per server. On Link loss, live streams close, listeners remain, and
-  the client reconnects with 1-60 s exponential backoff plus jitter. There is no
-  TCP resumption.
+  1 MiB after decompression. Never compress `DGRAM`.
+- One Link per server. On Link loss, live TCP streams and UDP sessions close,
+  listeners remain, and the client reconnects with 1-60 s exponential backoff
+  plus jitter. There is no TCP or UDP resumption.
+- A successful `/probe` or `/list` authenticates the Link, so a UDP-only client
+  is not torn down by `--auth-timeout`. A stream `OPEN` also authenticates it.
 - Servers are stealthy by default. `--announce` reveals only version, display
   name, and whether enumeration is enabled; never service names or backends.
 - `/list` requires `--list-password`. `/probe` validates service credentials

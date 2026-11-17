@@ -7,6 +7,7 @@ import pytest
 from rns_portfwd.constants import (
     MSG_CLOSE,
     MSG_DATA,
+    MSG_DGRAM,
     MSG_OPEN,
     MSG_OPEN_ERR,
     MSG_OPEN_OK,
@@ -18,6 +19,7 @@ from rns_portfwd.errors import ProtocolError
 from rns_portfwd.protocol import (
     MESSAGE_TYPES,
     CloseMessage,
+    DatagramMessage,
     DataMessage,
     OpenErrMessage,
     OpenMessage,
@@ -37,7 +39,15 @@ def roundtrip(message, cls):
 def test_message_types_are_unique_and_in_application_range():
     values = [cls.MSGTYPE for cls in MESSAGE_TYPES]
     assert len(set(values)) == len(values)
-    assert values == [MSG_OPEN, MSG_OPEN_OK, MSG_OPEN_ERR, MSG_DATA, MSG_WINDOW, MSG_CLOSE]
+    assert values == [
+        MSG_OPEN,
+        MSG_OPEN_OK,
+        MSG_OPEN_ERR,
+        MSG_DATA,
+        MSG_WINDOW,
+        MSG_CLOSE,
+        MSG_DGRAM,
+    ]
     assert all(0xAC00 <= value <= 0xAC0F for value in values)
 
 
@@ -80,6 +90,13 @@ def test_window_and_close_roundtrip():
     assert (close.stream_id, close.reason) == (3, CloseReason.NORMAL)
 
 
+def test_datagram_roundtrip_preserves_empty_and_binary_payloads():
+    message = roundtrip(DatagramMessage(5, b"\x00\xffhello"), DatagramMessage)
+    assert (message.stream_id, message.data) == (5, b"\x00\xffhello")
+    empty = roundtrip(DatagramMessage(6, b""), DatagramMessage)
+    assert (empty.stream_id, empty.data) == (6, b"")
+
+
 def test_malformed_messages_are_rejected():
     with pytest.raises(ProtocolError):
         OpenMessage().unpack(b"\x00")
@@ -103,6 +120,12 @@ def test_malformed_messages_are_rejected():
         WindowMessage(1, 0).pack()
     with pytest.raises(ProtocolError):
         CloseMessage(1, 99).pack()
+    with pytest.raises(ProtocolError):
+        DatagramMessage().unpack(b"\x00")
+    with pytest.raises(ProtocolError):
+        DatagramMessage().unpack(struct.pack(">H", 0x4000))
+    with pytest.raises(ProtocolError):
+        DatagramMessage(1, "not bytes").pack()
 
 
 def test_open_truncated_and_trailing():
