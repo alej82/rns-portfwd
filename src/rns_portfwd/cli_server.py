@@ -186,7 +186,16 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="FD",
         help="read a JSON secret document from a file descriptor",
     )
-    parser.add_argument("-v", "--verbose", action="count", default=0)
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
+        help=(
+            "increase diagnostic output (repeat: -v application debug, "
+            "-vv also Reticulum debug)"
+        ),
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
 

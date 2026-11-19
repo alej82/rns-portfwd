@@ -39,7 +39,7 @@ def setup_logging(verbosity: int = 0) -> _logging.Logger:
     logger = _logging.getLogger("rns_portfwd")
     if logger.handlers:
         return logger
-    level = _logging.DEBUG if verbosity >= 2 else _logging.INFO
+    level = _logging.DEBUG if verbosity >= 1 else _logging.INFO
     logger.setLevel(level)
     handler = _logging.StreamHandler(sys.stderr)
     handler.setLevel(level)
@@ -62,6 +62,6 @@ def rns_loglevel(verbosity: int) -> int:
             return RNS.LOG_CRITICAL
         if verbosity == 1:
             return RNS.LOG_NOTICE
-        return min(RNS.LOG_DEBUG, RNS.LOG_NOTICE + verbosity)
+        return RNS.LOG_DEBUG
     except Exception:
         return 0

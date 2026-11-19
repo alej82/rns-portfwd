@@ -104,7 +104,16 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="FD",
         help="read a JSON secret document from a file descriptor",
     )
-    parser.add_argument("-v", "--verbose", action="count", default=0)
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
+        help=(
+            "increase diagnostic output (repeat: -v application debug, "
+            "-vv also Reticulum debug)"
+        ),
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
     common = argparse.ArgumentParser(add_help=False)
@@ -120,7 +129,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     common.add_argument("--password-stdin", action="store_true", default=argparse.SUPPRESS)
     common.add_argument("--secrets-fd", type=int, default=argparse.SUPPRESS)
-    common.add_argument("-v", "--verbose", action="count", default=argparse.SUPPRESS)
+    common.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        dest="verbose_sub",
+        default=argparse.SUPPRESS,
+        help=(
+            "increase diagnostic output (repeat: -v application debug, "
+            "-vv also Reticulum debug)"
+        ),
+    )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -241,6 +260,7 @@ def _run_identity_command(args) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    args.verbose += getattr(args, "verbose_sub", 0)
     logger = setup_logging(args.verbose)
     try:
         _validate_common(args)

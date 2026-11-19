@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import sys
 
 import pytest
@@ -489,3 +490,57 @@ def test_server_passes_link_stamping_settings(monkeypatch):
     assert captured["link_stamp_cost"] == 12.5
     assert captured["max_half_open"] == 8
     assert captured["half_open_timeout"] == 45.0
+
+
+# --- verbose logging ------------------------------------------------------
+
+
+def test_client_parser_counts_verbose_before_and_after_subcommand():
+    args = build_client_parser().parse_args(
+        ["-v", "forward", "-v", "--server", HASH, "--forward", "ssh:2222:pw"]
+    )
+    assert args.verbose == 1
+    assert args.verbose_sub == 1
+
+
+def test_client_parser_counts_combined_verbose_after_subcommand():
+    args = build_client_parser().parse_args(
+        ["forward", "-vv", "--server", HASH, "--forward", "ssh:2222:pw"]
+    )
+    assert args.verbose == 0
+    assert args.verbose_sub == 2
+
+
+def test_client_main_combines_verbose_positions(monkeypatch):
+    captured = {}
+    logger = logging.getLogger("test.cli.verbose")
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def run(self):
+            pass
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr("rns_portfwd.cli_client.PortfwdClient", FakeClient)
+    monkeypatch.setattr(
+        "rns_portfwd.cli_client.setup_logging", lambda verbosity=0: logger
+    )
+    assert (
+        client_main(
+            [
+                "-v",
+                "forward",
+                "-v",
+                "--server",
+                HASH,
+                "--forward",
+                "ssh:2222:pw",
+            ]
+        )
+        == EXIT_OK
+    )
+    assert captured["verbosity"] == 2

@@ -12,6 +12,7 @@ from .constants import (
     DEFAULT_OPEN_TIMEOUT,
     DEFAULT_UDP_IDLE_TIMEOUT,
     DEFAULT_UDP_QUEUE,
+    DROP_LOG_INTERVAL,
     WINDOW_UPDATE_DIVISOR,
 )
 from .streams import SessionBase
@@ -59,6 +60,9 @@ class DatagramSession(SessionBase):
         self._threads: list[threading.Thread] = []
         self.dropped_oversized = 0
         self.dropped_queue_full = 0
+        self._drop_lock = threading.Lock()
+        self._pending_drops = {"oversized": 0, "queue_full": 0}
+        self._last_drop_log: float | None = None
 
     @property
     def last_activity(self) -> float:
@@ -69,6 +73,46 @@ class DatagramSession(SessionBase):
 
     def _touch(self) -> None:
         self._last_activity = time.monotonic()
+
+    def _record_drop(self, reason: str) -> None:
+        now = time.monotonic()
+        with self._drop_lock:
+            if reason == "oversized":
+                self.dropped_oversized += 1
+            else:
+                self.dropped_queue_full += 1
+            self._pending_drops[reason] += 1
+            if (
+                self._last_drop_log is not None
+                and now - self._last_drop_log < DROP_LOG_INTERVAL
+            ):
+                return
+            oversized = self._pending_drops["oversized"]
+            queue_full = self._pending_drops["queue_full"]
+            self._pending_drops["oversized"] = 0
+            self._pending_drops["queue_full"] = 0
+            self._last_drop_log = now
+        self._log_drops(oversized, queue_full)
+
+    def _flush_drops(self) -> None:
+        with self._drop_lock:
+            oversized = self._pending_drops["oversized"]
+            queue_full = self._pending_drops["queue_full"]
+            if not oversized and not queue_full:
+                return
+            self._pending_drops["oversized"] = 0
+            self._pending_drops["queue_full"] = 0
+            self._last_drop_log = time.monotonic()
+        self._log_drops(oversized, queue_full)
+
+    def _log_drops(self, oversized: int, queue_full: int) -> None:
+        self.logger.debug(
+            "dropped %d datagram(s) on %s: %d oversized, %d queue full",
+            oversized + queue_full,
+            self.label,
+            oversized,
+            queue_full,
+        )
 
     def max_datagram(self) -> int:
         limit = self.transport.max_datagram()
@@ -126,19 +170,12 @@ class DatagramSession(SessionBase):
             return False
         limit = self.max_datagram()
         if len(data) > limit:
-            self.dropped_oversized += 1
-            self.logger.debug(
-                "dropping oversized datagram on %s: %d > %d bytes",
-                self.label,
-                len(data),
-                limit,
-            )
+            self._record_drop("oversized")
             return False
         try:
             self._out_queue.put_nowait(data)
         except queue.Full:
-            self.dropped_queue_full += 1
-            self.logger.debug("dropping datagram on %s: queue full", self.label)
+            self._record_drop("queue_full")
             return False
         self._touch()
         return True
@@ -151,10 +188,7 @@ class DatagramSession(SessionBase):
         try:
             self._in_queue.put_nowait(data)
         except queue.Full:
-            self.dropped_queue_full += 1
-            self.logger.debug(
-                "dropping remote datagram on %s: local queue full", self.label
-            )
+            self._record_drop("queue_full")
 
     def _sender_loop(self) -> None:
         while not self._closed.is_set():
@@ -166,13 +200,7 @@ class DatagramSession(SessionBase):
                 return
             limit = self.max_datagram()
             if len(item) > limit:
-                self.dropped_oversized += 1
-                self.logger.debug(
-                    "dropping oversized datagram on %s: %d > %d bytes",
-                    self.label,
-                    len(item),
-                    limit,
-                )
+                self._record_drop("oversized")
                 continue
             if not self._send_credit.take(len(item), self._closed):
                 return
@@ -232,14 +260,13 @@ class DatagramSession(SessionBase):
             self.abort(f"local datagram read failed: {exc}")
             return None
         if (flags & _MSG_TRUNC) or len(data) > limit:
-            self.dropped_oversized += 1
-            self.logger.debug(
-                "dropping oversized local datagram on %s: more than %d bytes",
-                self.label,
-                limit,
-            )
+            self._record_drop("oversized")
             return None
         return data
+
+    def _notify_closed(self) -> None:
+        self._flush_drops()
+        super()._notify_closed()
 
     def _close_local(self) -> None:
         for wake_queue in (self._out_queue, self._in_queue):

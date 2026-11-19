@@ -448,6 +448,29 @@ credentials and not addresses.
 
 `--help` exits with 0.
 
+## Logging and diagnostics
+
+Both commands write diagnostics to `stderr`. `-v` / `--verbose` is repeatable
+and may appear before or after a subcommand:
+
+| Flag | Application log | Reticulum log |
+|------|-----------------|---------------|
+| (none) | `INFO` | `CRITICAL` |
+| `-v` | `DEBUG` | `NOTICE` |
+| `-vv` | `DEBUG` | `DEBUG` |
+
+Application `DEBUG` is the diagnostic level: it includes link ids, identity
+hashes and identity-wait decisions, which are never logged below `debug`.
+Registered secrets are redacted at every level, including `DEBUG`.
+
+Reticulum's logger is independent. `-vv` enables its debug output, which is very
+noisy and is not filtered through the application's redaction; no application
+secret is passed to Reticulum's logger.
+
+Repeated UDP drops are reported as periodic `DEBUG` summaries with counts per
+reason instead of one line per datagram, and pending counts are flushed when the
+session closes.
+
 ## Security notes
 
 - Passwords travel inside the end-to-end encrypted Reticulum `Link`; they are

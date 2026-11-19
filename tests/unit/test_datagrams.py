@@ -4,7 +4,11 @@ import logging
 import socket
 import threading
 import time
+from types import SimpleNamespace
 
+import pytest
+
+from rns_portfwd.constants import DROP_LOG_INTERVAL
 from rns_portfwd.datagrams import DatagramSession
 
 LOGGER = logging.getLogger("test.datagrams")
@@ -172,3 +176,131 @@ def test_datagram_session_uses_peer_window_for_size_limit():
         session.abort("test cleanup", send_close=False)
         local.close()
         peer.close()
+
+
+class CaptureLogger:
+    def __init__(self):
+        self.records: list[tuple[str, str]] = []
+
+    def _record(self, level, message, args):
+        self.records.append((level, message % args if args else message))
+
+    def debug(self, message, *args, **kwargs):
+        self._record("debug", message, args)
+
+    def info(self, message, *args, **kwargs):
+        self._record("info", message, args)
+
+    def warning(self, message, *args, **kwargs):
+        self._record("warning", message, args)
+
+    def error(self, message, *args, **kwargs):
+        self._record("error", message, args)
+
+
+class Clock:
+    def __init__(self, now=1000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    value = Clock()
+    monkeypatch.setattr(
+        "rns_portfwd.datagrams.time", SimpleNamespace(monotonic=value)
+    )
+    return value
+
+
+def make_drop_session(logger, transport, queue_size=256):
+    return DatagramSession(
+        99,
+        None,
+        transport,
+        window=4096,
+        logger=logger,
+        label="udp/test",
+        queue_size=queue_size,
+    )
+
+
+def test_first_drop_is_logged_immediately():
+    logger = CaptureLogger()
+    session = make_drop_session(logger, FakeTransport(max_datagram=10))
+
+    assert session.send_local(b"x" * 11) is False
+
+    assert session.dropped_oversized == 1
+    assert len(logger.records) == 1
+    level, message = logger.records[0]
+    assert level == "debug"
+    assert "1 oversized" in message
+
+
+def test_repeated_drops_are_summarised_per_window(clock):
+    logger = CaptureLogger()
+    session = make_drop_session(logger, FakeTransport(max_datagram=10))
+
+    assert session.send_local(b"x" * 11) is False
+    clock.now += 1
+    assert session.send_local(b"x" * 11) is False
+    assert session.send_local(b"x" * 11) is False
+    assert len(logger.records) == 1
+
+    clock.now += DROP_LOG_INTERVAL
+    assert session.send_local(b"x" * 11) is False
+
+    assert len(logger.records) == 2
+    assert "3 oversized" in logger.records[1][1]
+    assert session.dropped_oversized == 4
+
+
+def test_drop_summary_distinguishes_reasons(clock):
+    logger = CaptureLogger()
+    session = make_drop_session(
+        logger, FakeTransport(max_datagram=10), queue_size=1
+    )
+
+    assert session.send_local(b"x" * 11) is False
+    clock.now += 1
+    assert session.send_local(b"ok") is True
+    assert session.send_local(b"no") is False
+    clock.now += DROP_LOG_INTERVAL
+    assert session.send_local(b"x" * 11) is False
+
+    assert len(logger.records) == 2
+    message = logger.records[1][1]
+    assert "2 datagram(s)" in message
+    assert "1 oversized" in message
+    assert "1 queue full" in message
+    assert session.dropped_oversized == 2
+    assert session.dropped_queue_full == 1
+
+
+def test_pending_drops_are_flushed_on_close(clock):
+    logger = CaptureLogger()
+    session = make_drop_session(logger, FakeTransport(max_datagram=10))
+
+    assert session.send_local(b"x" * 11) is False
+    clock.now += 1
+    assert session.send_local(b"x" * 11) is False
+    assert len(logger.records) == 1
+
+    session.abort("done", send_close=False)
+
+    drop_records = [
+        (index, message)
+        for index, (level, message) in enumerate(logger.records)
+        if "datagram(s)" in message
+    ]
+    assert len(drop_records) == 2
+    assert "1 oversized" in drop_records[1][1]
+    close_index = next(
+        index
+        for index, (level, message) in enumerate(logger.records)
+        if level == "info"
+    )
+    assert drop_records[1][0] < close_index
